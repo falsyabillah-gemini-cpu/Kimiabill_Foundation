@@ -424,3 +424,33 @@ def test_token_age_warning_and_engagement_dedup() -> None:
     assert summary["telegram_status"] == "SENT"
     assert "pembeli_1" in tg_payloads[0]["text"]
     assert "rep_user1" in sheets.list_existing_comment_ids()
+
+
+def test_csv_importer_parse_and_dedup(tmp_path: Any) -> None:
+    from src.csv_importer import import_csv_to_sheets, normalize_shopee_price
+
+    assert normalize_shopee_price("48,8RB") == "Rp48.800"
+    assert normalize_shopee_price("1,4JT") == "Rp1.400.000"
+
+    csv_file = tmp_path / "shopee_bulk.csv"
+    csv_file.write_text(
+        "ID Produk,Nama Produk,Harga,Penjualan,Nama Toko,Komisi hingga,Komisi,Link Produk,Link Komisi Ekstra\n"
+        '101,(HOT)BASIKE Charger 40W,"54,5RB",10RB+,Basike Official,"18,5%",Rp9.810,https://shopee.co.id/p1,https://s.shopee.co.id/short1\n'
+        '102,Lampu Meja Clamp LED,"129,0RB",1RB+,Michizuru,"11,5%",Rp14.190,https://shopee.co.id/p2,https://s.shopee.co.id/short2\n',
+        encoding="utf-8",
+    )
+
+    sheets = _make_fake_sheets()
+    first = import_csv_to_sheets(sheets, csv_file)
+    assert first == {"total_csv": 2, "added": 2, "skipped": 0}
+
+    rows = sheets.list_queue_rows()
+    assert rows[0].status == "PENDING"
+    assert rows[0].nama_produk == "BASIKE Charger 40W"
+    assert rows[0].harga_kisaran == "Rp54.500"
+    assert rows[0].link_affiliate == "https://s.shopee.co.id/short1"
+    assert rows[0].sumber == "CSV_BULK_IMPORT"
+
+    second = import_csv_to_sheets(sheets, csv_file)
+    assert second == {"total_csv": 2, "added": 0, "skipped": 2}
+

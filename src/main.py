@@ -15,6 +15,7 @@ from src.config import (
     parse_model_chain,
 )
 from src.copywriter_agent import generate_copywriting
+from src.csv_importer import import_csv_to_sheets
 from src.engagement_manager import run_engagement_manager
 from src.gemini_client import GeminiClient
 from src.publishers import (
@@ -237,11 +238,20 @@ def run_check_gemini(settings: Settings) -> int:
     return 0
 
 
+def run_import_csv(settings: Settings, csv_file: str) -> int:
+    sheets_client = SheetsClient(
+        settings.google_sheet_id, settings.google_service_account_json
+    )
+    summary = import_csv_to_sheets(sheets_client, csv_file)
+    print(f"[main] Impor CSV selesai: {summary}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Kantor Agent Affiliate Online (Dual Threads + X)")
     parser.add_argument(
         "command",
-        choices=["publish", "engagement", "check-gemini"],
+        choices=["publish", "engagement", "check-gemini", "import-csv"],
         help="Mode eksekusi agent",
     )
     parser.add_argument(
@@ -250,6 +260,12 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Aktifkan mode uji coba (override DRY_RUN env)",
     )
+    parser.add_argument(
+        "--file",
+        dest="csv_file",
+        default="",
+        help="Path file CSV Shopee untuk command import-csv",
+    )
     args = parser.parse_args(argv)
     settings = Settings.from_env(dry_run_override=True if args.dry_run else None)
 
@@ -257,6 +273,10 @@ def main(argv: list[str] | None = None) -> int:
         return run_publish_pipeline(settings)
     if args.command == "engagement":
         return run_engagement_pipeline(settings)
+    if args.command == "import-csv":
+        if not args.csv_file:
+            parser.error("--file wajib diisi untuk command import-csv")
+        return run_import_csv(settings, args.csv_file)
     return run_check_gemini(settings)
 
 
