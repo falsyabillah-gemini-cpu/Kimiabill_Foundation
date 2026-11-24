@@ -1,0 +1,426 @@
+"""Unit test untuk seluruh agent Kantor Agent Affiliate Online."""
+from __future__ import annotations
+
+import json
+from datetime import date
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+from pydantic import BaseModel
+
+from src.config import Settings
+from src.copywriter_agent import CopywritingDraft, generate_copywriting, run_qc_and_sanitize
+from src.engagement_manager import check_token_age_warning, run_engagement_manager
+from src.gemini_client import GeminiClient, GeminiClientError
+from src.publishers import format_publish_telegram_message, publish_to_threads
+from src.sheets_client import ProductRow, SheetsClient
+from src.shopee_hunter import fetch_shopee_xtra_product, pick_next_product
+
+
+class _SampleOut(BaseModel):
+    answer: str
+
+
+class _FakeModelsAPI:
+    def __init__(self, behaviors: dict[str, list[Any]], listed_models: list[str] | None = None):
+        self.behaviors = behaviors
+        self.calls: list[str] = []
+        self.listed_models = listed_models or []
+
+    def generate_content(self, *, model: str, contents: str, config: Any) -> Any:
+        self.calls.append(model)
+        queue = self.behaviors.get(model, [])
+        if not queue:
+            raise RuntimeError(f"404 NOT_FOUND: model {model} not configured")
+        outcome = queue.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return SimpleNamespace(text=json.dumps(outcome))
+
+    def list(self) -> list[Any]:
+        return [
+            SimpleNamespace(name=f"models/{m}", supported_actions=["generateContent"])
+            for m in self.listed_models
+        ]
+
+
+class _FakeGenAIClient:
+    def __init__(self, behaviors: dict[str, list[Any]], listed_models: list[str] | None = None):
+        self.models = _FakeModelsAPI(behaviors, listed_models=listed_models)
+
+
+class _FakeWorksheet:
+    def __init__(self, rows: list[list[str]]):
+        self.rows = [list(r) for r in rows]
+
+    def get_all_values(self) -> list[list[str]]:
+        return [list(r) for r in self.rows]
+
+    def batch_update(self, data: list[dict[str, Any]], value_input_option: str = "USER_ENTERED") -> None:
+        for item in data:
+            ref = item["range"]
+            col_letters = "".join(ch for ch in ref if ch.isalpha())
+            row_num = int("".join(ch for ch in ref if ch.isdigit()))
+            col_idx = 0
+            for ch in col_letters:
+                col_idx = col_idx * 26 + (ord(ch.upper()) - ord("A") + 1)
+            col_idx -= 1
+            while len(self.rows) < row_num:
+                self.rows.append([])
+            while len(self.rows[row_num - 1]) <= col_idx:
+                self.rows[row_num - 1].append("")
+            self.rows[row_num - 1][col_idx] = item["values"][0][0]
+
+    def update(self, *, range_name: str, values: list[list[str]], value_input_option: str = "USER_ENTERED") -> None:
+        start_cell = range_name.split(":")[0]
+        row_num = int("".join(ch for ch in start_cell if ch.isdigit()))
+        while len(self.rows) < row_num:
+            self.rows.append([])
+        self.rows[row_num - 1] = list(values[0])
+
+
+class _FakeSpreadsheet:
+    def __init__(self, tabs: dict[str, list[list[str]]]):
+        self.sheets = {k: _FakeWorksheet(v) for k, v in tabs.items()}
+
+    def worksheet(self, title: str) -> _FakeWorksheet:
+        return self.sheets[title]
+
+
+def _make_fake_sheets(pending_rows: list[list[str]] | None = None) -> SheetsClient:
+    antrean_headers = [
+        "ID", "Status", "Kategori", "Nama_Produk", "Harga_Kisaran",
+        "Masalah_dan_Keunggulan", "Link_Affiliate", "URL_Foto_Publik",
+        "Catatan_User_untuk_AI", "Sumber", "Waktu_Tayang_WIB",
+        "Threads_Post_ID", "Link_Post_Threads", "Model_AI_Dipakai", "Catatan_Agent",
+    ]
+    log_headers = [
+        "Tanggal_WIB", "ID_Produk", "Nama_Produk", "Mode_Run", "Status_Threads",
+        "Threads_Post_ID", "Threads_Reply_ID", "Draft_Threads", "Draft_Reply_Link",
+        "Draft_X", "Status_Telegram", "Model_AI_Dipakai", "Catatan_QC",
+    ]
+    komentar_headers = [
+        "Tanggal_WIB", "Threads_Post_ID", "Comment_ID", "Username_Komentar",
+        "Isi_Komentar", "Saran_Balasan_AI", "Model_AI_Dipakai",
+        "Status_Balasan", "Balasan_Manual_User",
+    ]
+    pengaturan_rows = [
+        ["Kunci", "Nilai", "Kategori_Setting", "Keterangan"],
+        ["Niche_Utama", "Gadget Meja Kerja", "Konten", ""],
+        ["Model_Gemini_Utama", "gemini-4-hydrogen", "AI Model", ""],
+        ["Rantai_Fallback_Gemini", "gemini-4-hydrogen, gemini-3.8-flash, gemini-3.6-flash", "AI Model", ""],
+        ["Kata_Kunci_Auto_Hunter", "lampu monitor", "Auto Hunter", ""],
+        ["Min_Rating_Shopee", "4.7", "Auto Hunter", ""],
+        ["Min_Stok_Peringatan", "5", "Monitoring", ""],
+        ["Auto_Reply_Komentar", "OFF", "Engagement", ""],
+        ["Tanggal_Token_Threads", "2026-09-01", "Opsional", ""],
+    ]
+    tabs = {
+        "Antrean_Produk": [antrean_headers] + (pending_rows or []),
+        "Log_Performa": [log_headers],
+        "Komentar_Threads": [komentar_headers],
+        "Pengaturan_Agent": pengaturan_rows,
+    }
+    return SheetsClient("sheet-123", "", spreadsheet=_FakeSpreadsheet(tabs))
+
+
+def test_gemini_gradual_fallback_and_exhaustion_cache() -> None:
+    fake = _FakeGenAIClient(
+        {
+            "gemini-4-hydrogen": [RuntimeError("429 RESOURCE_EXHAUSTED: quota limit")],
+            "gemini-3.8-flash": [RuntimeError("403 PERMISSION_DENIED: billing required")],
+            "gemini-3.6-flash": [{"answer": "ok1"}, {"answer": "ok2"}],
+        }
+    )
+    client = GeminiClient(
+        "dummy-key",
+        primary_model="gemini-4-hydrogen",
+        fallback_chain=("gemini-4-hydrogen", "gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash"),
+        client=fake,
+        sleep_fn=lambda _: None,
+    )
+
+    res1, meta1 = client.generate_structured(
+        system_prompt="sys", user_prompt="usr", response_model=_SampleOut
+    )
+    assert res1.answer == "ok1"
+    assert meta1.requested_model == "gemini-4-hydrogen"
+    assert meta1.actual_model == "gemini-3.6-flash"
+    assert meta1.used_fallback is True
+    assert meta1.attempted_models == ("gemini-4-hydrogen", "gemini-3.8-flash", "gemini-3.6-flash")
+
+    # Panggilan kedua pada run yang sama langsung melompati model yang sudah exhausted
+    res2, meta2 = client.generate_structured(
+        system_prompt="sys", user_prompt="usr2", response_model=_SampleOut
+    )
+    assert res2.answer == "ok2"
+    assert meta2.attempted_models == ("gemini-3.6-flash",)
+
+
+def test_gemini_dynamic_discovery_when_static_models_fail() -> None:
+    fake = _FakeGenAIClient(
+        {
+            "gemini-4-hydrogen": [RuntimeError("429 quota")],
+            "gemini-3.9-flash": [{"answer": "discovered-ok"}],
+        },
+        listed_models=["gemini-3.9-flash", "gemini-2.5-flash-tts"],
+    )
+    client = GeminiClient(
+        "dummy-key",
+        primary_model="gemini-4-hydrogen",
+        fallback_chain=("gemini-4-hydrogen",),
+        client=fake,
+        sleep_fn=lambda _: None,
+    )
+    # Override parse_model_chain additions for isolated discovery check
+    client.fallback_chain = ("gemini-4-hydrogen",)
+    res, meta = client.generate_structured(
+        system_prompt="sys", user_prompt="usr", response_model=_SampleOut
+    )
+    assert res.answer == "discovered-ok"
+    assert meta.actual_model == "gemini-3.9-flash"
+
+
+def test_gemini_401_raises_immediately() -> None:
+    fake = _FakeGenAIClient({"gemini-4-hydrogen": [RuntimeError("401 API key invalid")]})
+    client = GeminiClient("bad", client=fake, sleep_fn=lambda _: None)
+    with pytest.raises(GeminiClientError, match="401"):
+        client.generate_structured(system_prompt="s", user_prompt="u", response_model=_SampleOut)
+
+
+def test_copywriter_qc_strips_leaked_link_and_ensures_reply_has_link() -> None:
+    link = "https://s.shopee.co.id/abc123"
+    draft = CopywritingDraft(
+        threads_main_post=f"Meja berantakan? Pakai klip ini {link} dijamin rapi!",
+        threads_reply_text="Beli di sini ya kak",
+        x_draft_post="Klip kabel magnetik anti jatuh.",
+    )
+    sanitized, qc_ok, note = run_qc_and_sanitize(draft, link)
+    assert qc_ok is False
+    assert "shopee" not in sanitized.threads_main_post.lower()
+    assert link in sanitized.threads_reply_text
+    assert link in sanitized.x_draft_post
+    assert "dibersihkan" in note
+
+
+def test_copywriter_retries_once_on_link_leak() -> None:
+    link = "https://s.shopee.co.id/xyz999"
+    fake = _FakeGenAIClient(
+        {
+            "gemini-4-hydrogen": [
+                {
+                    "threads_main_post": f"Cek barang ini di {link}",
+                    "threads_reply_text": f"Link: {link}",
+                    "x_draft_post": f"Rekomendasi meja: {link}",
+                },
+                {
+                    "threads_main_post": "Kabel charger sering jatuh? Pakai klip magnetik ini, cek komentar ya!",
+                    "threads_reply_text": f"Ini link resminya: {link}",
+                    "x_draft_post": f"Klip kabel magnetik praktis. {link}",
+                },
+            ]
+        }
+    )
+    gemini = GeminiClient("k", client=fake, sleep_fn=lambda _: None)
+    product = ProductRow(
+        row_number=2,
+        product_id="1",
+        status="PENDING",
+        kategori="Meja Kerja",
+        nama_produk="Kabel Organizer",
+        harga_kisaran="Rp25.000",
+        masalah_dan_keunggulan="Kabel rapi tidak jatuh ke kolong",
+        link_affiliate=link,
+    )
+    res = generate_copywriting(gemini, product, {})
+    assert res.qc_passed is True
+    assert link not in res.draft.threads_main_post
+    assert link in res.draft.threads_reply_text
+
+
+def test_hunter_marks_invalid_row_error_and_picks_next_valid() -> None:
+    sheets = _make_fake_sheets(
+        [
+            ["1", "PENDING", "Meja", "Produk Rusak", "", "Desc", "https://s.shopee.co.id/CONTOH_GANTI_LINK_ANDA", "", "", "SHEET_MANUAL", "", "", "", "", ""],
+            ["2", "PENDING", "Meja", "Lampu Monitor", "Rp199.000", "Terang merata tidak silau", "https://s.shopee.co.id/lampu123", "", "", "SHEET_MANUAL", "", "", "", "", ""],
+        ]
+    )
+    settings = Settings.from_env(dry_run_override=True)
+    chosen = pick_next_product(sheets, settings, sheets.get_settings())
+    assert chosen is not None
+    assert chosen.nama_produk == "Lampu Monitor"
+    rows = sheets.list_queue_rows()
+    assert rows[0].status == "ERROR"
+    assert rows[1].status == "PENDING"  # dry_run keeps PENDING
+
+
+def test_shopee_auto_hunter_filters_rating_and_commission() -> None:
+    class _FakeResp:
+        status_code = 200
+
+        def json(self) -> dict[str, Any]:
+            return {
+                "data": {
+                    "productOfferV2": {
+                        "nodes": [
+                            {
+                                "productName": "Produk Rating Rendah",
+                                "ratingStar": 4.2,
+                                "sellerCommissionRate": 0.1,
+                                "offerLink": "https://s.shopee.co.id/low",
+                                "priceMin": 50000,
+                            },
+                            {
+                                "productName": "Lampu Monitor Baseus",
+                                "ratingStar": 4.9,
+                                "sellerCommissionRate": 0.08,
+                                "commissionRate": 0.02,
+                                "sales": 1200,
+                                "offerLink": "https://s.shopee.co.id/lampu",
+                                "imageUrl": "https://cf.shopee.co.id/img.jpg",
+                                "priceMin": 249000,
+                            },
+                        ]
+                    }
+                }
+            }
+
+    found = fetch_shopee_xtra_product(
+        app_id="123",
+        secret="sec",
+        keywords=["lampu monitor"],
+        min_rating=4.7,
+        http_post=lambda *a, **kw: _FakeResp(),
+    )
+    assert found is not None
+    assert found["nama_produk"] == "Lampu Monitor Baseus"
+    assert found["harga_kisaran"] == "Rp249.000"
+
+
+def test_publish_to_threads_live_and_telegram_escaping() -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def fake_post(url: str, data: dict[str, Any] | None = None, **kw: Any) -> Any:
+        calls.append((url, data or {}))
+        if url.endswith("/threads"):
+            cid = "c_reply" if "reply_to_id" in (data or {}) else "c_main"
+            return SimpleNamespace(status_code=200, json=lambda: {"id": cid})
+        if url.endswith("/threads_publish"):
+            pid = "p_reply" if (data or {}).get("creation_id") == "c_reply" else "p_main"
+            return SimpleNamespace(status_code=200, json=lambda: {"id": pid})
+        raise AssertionError(url)
+
+    def fake_get(url: str, params: dict[str, Any] | None = None, **kw: Any) -> Any:
+        if url.endswith("/p_main"):
+            return SimpleNamespace(
+                status_code=200,
+                json=lambda: {"id": "p_main", "permalink": "https://www.threads.net/@user/post/123"},
+            )
+        return SimpleNamespace(status_code=200, json=lambda: {"status": "FINISHED"})
+
+    res = publish_to_threads(
+        user_id="u1",
+        access_token="tok",
+        main_post="Utas tanpa link",
+        reply_text="Link: https://s.shopee.co.id/abc",
+        image_url="https://example.com/a.jpg",
+        dry_run=False,
+        http_post=fake_post,
+        http_get=fake_get,
+        sleep_fn=lambda _: None,
+    )
+    assert res.status == "PUBLISHED"
+    assert res.post_id == "p_main"
+    assert res.reply_id == "p_reply"
+    assert "threads.net" in res.permalink
+    assert calls[0][1]["media_type"] == "IMAGE"
+    assert calls[2][1]["reply_to_id"] == "p_main"
+
+    tg_msg = format_publish_telegram_message(
+        product_name="Rak <Sudut> & Meja",
+        kategori="Kos",
+        threads_result=res,
+        threads_main_post="Main",
+        threads_reply_text="Reply",
+        x_draft_post="X draft",
+        model_label="gemini-3.8-flash (fallback dari gemini-4-hydrogen)",
+        qc_notes="OK",
+        pending_remaining=2,
+        min_stock=5,
+        dry_run=False,
+    )
+    assert "Rak &lt;Sudut&gt; &amp; Meja" in tg_msg
+    assert "Di bawah batas minimum 5" in tg_msg
+
+
+def test_token_age_warning_and_engagement_dedup() -> None:
+    assert check_token_age_warning("2026-09-01", today=date(2026, 11, 24)) is not None
+    assert check_token_age_warning("2026-11-10", today=date(2026, 11, 24)) is None
+
+    sheets = _make_fake_sheets()
+    sheets.append_performance_log(
+        {
+            "Tanggal_WIB": "2026-11-24 12:00:00 WIB",
+            "ID_Produk": "1",
+            "Nama_Produk": "Lampu Monitor",
+            "Mode_Run": "LIVE",
+            "Status_Threads": "PUBLISHED",
+            "Threads_Post_ID": "post_1",
+            "Threads_Reply_ID": "rep_own",
+            "Draft_Threads": "Utas",
+            "Draft_Reply_Link": "https://s.shopee.co.id/abc",
+            "Draft_X": "X",
+            "Status_Telegram": "SENT",
+            "Model_AI_Dipakai": "gemini-4-hydrogen",
+            "Catatan_QC": "OK",
+        }
+    )
+
+    fake_ai = _FakeGenAIClient(
+        {"gemini-4-hydrogen": [{"reply_text": "Halo kak! Linknya sudah aku taruh di balasan pertama ya 🙌"}]}
+    )
+    gemini = GeminiClient("k", client=fake_ai, sleep_fn=lambda _: None)
+
+    def fake_get(url: str, **kw: Any) -> Any:
+        return SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "data": [
+                    {"id": "rep_own", "text": "Cek di sini https://s.shopee.co.id/abc", "username": "me"},
+                    {"id": "rep_user1", "text": "Kak ini wattnya berapa ya?", "username": "pembeli_1"},
+                ]
+            },
+        )
+
+    tg_payloads: list[dict[str, Any]] = []
+
+    def fake_post(url: str, json: dict[str, Any] | None = None, **kw: Any) -> Any:
+        tg_payloads.append(json or {})
+        return SimpleNamespace(status_code=200, json=lambda: {"ok": True})
+
+    settings = Settings(
+        gemini_api_key="k",
+        gemini_primary_model="gemini-4-hydrogen",
+        google_sheet_id="sheet-123",
+        google_service_account_json="",
+        telegram_bot_token="bot",
+        telegram_chat_id="123",
+        threads_user_id="u1",
+        threads_access_token="tok",
+        shopee_app_id="",
+        shopee_secret="",
+        dry_run=False,
+    )
+
+    summary = run_engagement_manager(
+        settings=settings,
+        sheets=sheets,
+        gemini=gemini,
+        http_get=fake_get,
+        http_post=fake_post,
+    )
+    assert summary["new_comments"] == 1
+    assert summary["telegram_status"] == "SENT"
+    assert "pembeli_1" in tg_payloads[0]["text"]
+    assert "rep_user1" in sheets.list_existing_comment_ids()
