@@ -116,11 +116,22 @@ def _make_fake_sheets(pending_rows: list[list[str]] | None = None) -> SheetsClie
         ["Auto_Reply_Komentar", "OFF", "Engagement", ""],
         ["Tanggal_Token_Threads", "2026-09-01", "Opsional", ""],
     ]
+    referensi_headers = [
+        "Tanggal_Input", "Status_Riset", "Akun_atau_Sumber",
+        "Teks_Postingan_Contoh", "Perkiraan_Engagement", "Catatan_Kenapa_Bagus",
+    ]
+    audit_headers = [
+        "Tanggal_Audit_WIB", "Sumber_Riset", "Pola_Hook_Terbaik",
+        "Pola_Kalimat_Human", "Pola_CTA_Link_Reply", "Pantangan_QC_Baru",
+        "Ringkasan_Eksekutif", "Status_Feed_Copywriter", "Model_AI_Dipakai",
+    ]
     tabs = {
         "Antrean_Produk": [antrean_headers] + (pending_rows or []),
         "Log_Performa": [log_headers],
         "Komentar_Threads": [komentar_headers],
         "Pengaturan_Agent": pengaturan_rows,
+        "Referensi_Viral_Threads": [referensi_headers],
+        "Audit_Riset_Threads": [audit_headers],
     }
     return SheetsClient("sheet-123", "", spreadsheet=_FakeSpreadsheet(tabs))
 
@@ -453,4 +464,116 @@ def test_csv_importer_parse_and_dedup(tmp_path: Any) -> None:
 
     second = import_csv_to_sheets(sheets, csv_file)
     assert second == {"total_csv": 2, "added": 0, "skipped": 2}
+
+
+def test_agent6_trend_researcher_feeds_copywriter_and_adds_sheet_link() -> None:
+    from src.trend_researcher import run_trend_researcher
+
+    sheets = _make_fake_sheets()
+    sheets._spreadsheet.worksheet("Referensi_Viral_Threads").update(
+        range_name="A2:F2",
+        values=[[
+            "2026-11-25",
+            "AKTIF",
+            "@affiliate_pro",
+            "Jujur nyesel baru tau ada klip kabel magnetik gini, meja kerja langsung rapi.",
+            "300 likes",
+            "Hook jujur & natural",
+        ]],
+    )
+
+    fake_ai = _FakeGenAIClient(
+        {
+            "gemini-4-hydrogen": [
+                RuntimeError("400 INVALID_ARGUMENT: google_search tool unsupported"),
+                {
+                    "pola_hook_terbaik": "1. Pengakuan jujur\n2. Pertanyaan relate",
+                    "pola_kalimat_human": "Pakai kalimat pendek dan cerita nyata.",
+                    "pola_cta_link_reply": "Linknya aku taro di balasan ya.",
+                    "pantangan_qc": ["jangan lewatkan", "klik keranjang kuning"],
+                    "ringkasan_eksekutif": "Konten bergaya curhat singkat lebih tinggi reply-nya.",
+                },
+            ]
+        }
+    )
+    gemini = GeminiClient("k", client=fake_ai, sleep_fn=lambda _: None)
+
+    def fake_get(url: str, **kw: Any) -> Any:
+        if url.endswith("/threads"):
+            return SimpleNamespace(
+                status_code=200,
+                json=lambda: {"data": [{"id": "p1", "text": "Contoh post sendiri"}]},
+            )
+        if "/insights" in url:
+            return SimpleNamespace(
+                status_code=200,
+                json=lambda: {"data": [{"name": "views", "values": [{"value": 1200}]}]},
+            )
+        return SimpleNamespace(status_code=200, json=lambda: {"data": []})
+
+    tg_payloads: list[dict[str, Any]] = []
+
+    def fake_post(url: str, json: dict[str, Any] | None = None, **kw: Any) -> Any:
+        tg_payloads.append(json or {})
+        return SimpleNamespace(status_code=200, json=lambda: {"ok": True})
+
+    settings = Settings(
+        gemini_api_key="k",
+        gemini_primary_model="gemini-4-hydrogen",
+        google_sheet_id="sheet-123",
+        google_service_account_json="",
+        telegram_bot_token="bot",
+        telegram_chat_id="123",
+        threads_user_id="u1",
+        threads_access_token="tok",
+        shopee_app_id="",
+        shopee_secret="",
+        dry_run=False,
+    )
+
+    res = run_trend_researcher(
+        settings=settings,
+        sheets=sheets,
+        gemini=gemini,
+        http_get=fake_get,
+        http_post=fake_post,
+    )
+    assert res["telegram_status"] == "SENT"
+    assert "docs.google.com/spreadsheets/d/sheet-123/edit" in tg_payloads[0]["text"]
+
+    latest_audit = sheets.get_latest_active_audit()
+    assert latest_audit is not None
+    assert "klik keranjang kuning" in latest_audit["Pantangan_QC_Baru"]
+
+    # Verifikasi QC Copywriter menangkap frasa pantangan dari Agent 6 lalu rewrite
+    draft = CopywritingDraft(
+        threads_main_post="Meja rapi! Jangan lewatkan, langsung klik keranjang kuning sekarang.",
+        threads_reply_text="Ini linknya https://s.shopee.co.id/test1",
+        x_draft_post="Meja rapi https://s.shopee.co.id/test1",
+    )
+    from src.copywriter_agent import parse_banned_phrases
+
+    banned = parse_banned_phrases(latest_audit["Pantangan_QC_Baru"])
+    _, qc_ok, qc_notes = run_qc_and_sanitize(
+        draft, "https://s.shopee.co.id/test1", banned_phrases=banned
+    )
+    assert qc_ok is False
+    assert "frasa kaku/iklan" in qc_notes
+
+    tg_pub = format_publish_telegram_message(
+        product_name="Kabel Klip",
+        kategori="Meja",
+        threads_result=SimpleNamespace(status="PUBLISHED", permalink="https://threads.com/p/1", error_message=""),
+        threads_main_post="Main",
+        threads_reply_text="Reply",
+        x_draft_post="X",
+        model_label="gemini-4-hydrogen",
+        qc_notes="OK",
+        pending_remaining=10,
+        min_stock=5,
+        dry_run=False,
+        sheet_link="https://docs.google.com/spreadsheets/d/sheet-123/edit",
+    )
+    assert "https://docs.google.com/spreadsheets/d/sheet-123/edit" in tg_pub
+
 

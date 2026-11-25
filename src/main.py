@@ -13,6 +13,7 @@ from src.config import (
     Settings,
     now_wib_str,
     parse_model_chain,
+    sheet_url,
 )
 from src.copywriter_agent import generate_copywriting
 from src.csv_importer import import_csv_to_sheets
@@ -25,6 +26,7 @@ from src.publishers import (
 )
 from src.sheets_client import SheetsClient
 from src.shopee_hunter import pick_next_product
+from src.trend_researcher import run_trend_researcher
 
 
 def _build_gemini_client(settings: Settings, sheet_config: dict[str, str]) -> GeminiClient:
@@ -56,6 +58,7 @@ def run_publish_pipeline(
     )
     sheet_config = sheets_client.get_settings()
     gemini_client = gemini or _build_gemini_client(settings, sheet_config)
+    gs_link = sheet_url(settings.google_sheet_id)
 
     try:
         min_stock = int(sheet_config.get("Min_Stok_Peringatan", "5") or 5)
@@ -70,13 +73,17 @@ def run_publish_pipeline(
             html_text=(
                 "📦 <b>Kantor Agent Affiliate:</b> Tidak ada produk berstatus <code>PENDING</code> "
                 "di tab <i>Antrean_Produk</i> saat jadwal berjalan.\n"
-                "Tambahkan produk baru (atau isi <code>SHOPEE_APP_ID</code> &amp; <code>SHOPEE_SECRET</code>)."
+                "Tambahkan produk baru (atau isi <code>SHOPEE_APP_ID</code> &amp; <code>SHOPEE_SECRET</code>).\n\n"
+                f"📊 <a href=\"{html.escape(gs_link)}\">Buka Google Sheets (Antrean &amp; Laporan)</a>"
             ),
         )
         return 0
 
+    audit_report = sheets_client.get_latest_active_audit()
     try:
-        copy_res = generate_copywriting(gemini_client, product, sheet_config)
+        copy_res = generate_copywriting(
+            gemini_client, product, sheet_config, audit_report=audit_report
+        )
     except Exception as exc:
         err_msg = f"[{now_wib_str()}] Gagal Copywriter/Gemini: {exc}"
         if not settings.dry_run:
@@ -94,7 +101,8 @@ def run_publish_pipeline(
             chat_id=settings.telegram_chat_id,
             html_text=(
                 f"❌ <b>Error Copywriter</b> pada produk <b>{html.escape(product.nama_produk)}</b>:\n"
-                f"<code>{html.escape(str(exc))}</code>"
+                f"<code>{html.escape(str(exc))}</code>\n\n"
+                f"📊 <a href=\"{html.escape(gs_link)}\">Buka Google Sheets</a>"
             ),
         )
         raise
@@ -126,6 +134,7 @@ def run_publish_pipeline(
         pending_remaining=pending_remaining,
         min_stock=min_stock,
         dry_run=settings.dry_run,
+        sheet_link=gs_link,
     )
     tg_status, tg_detail = send_telegram_message(
         bot_token=settings.telegram_bot_token,
@@ -247,11 +256,26 @@ def run_import_csv(settings: Settings, csv_file: str) -> int:
     return 0
 
 
+def run_research_pipeline(settings: Settings) -> int:
+    sheets_client = SheetsClient(
+        settings.google_sheet_id, settings.google_service_account_json
+    )
+    sheet_config = sheets_client.get_settings()
+    gemini_client = _build_gemini_client(settings, sheet_config)
+    summary = run_trend_researcher(
+        settings=settings,
+        sheets=sheets_client,
+        gemini=gemini_client,
+    )
+    print(f"[main] Riset Agent 6 selesai: {summary}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Kantor Agent Affiliate Online (Dual Threads + X)")
     parser.add_argument(
         "command",
-        choices=["publish", "engagement", "check-gemini", "import-csv"],
+        choices=["publish", "engagement", "research", "check-gemini", "import-csv"],
         help="Mode eksekusi agent",
     )
     parser.add_argument(
@@ -273,6 +297,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_publish_pipeline(settings)
     if args.command == "engagement":
         return run_engagement_pipeline(settings)
+    if args.command == "research":
+        return run_research_pipeline(settings)
     if args.command == "import-csv":
         if not args.csv_file:
             parser.error("--file wajib diisi untuk command import-csv")

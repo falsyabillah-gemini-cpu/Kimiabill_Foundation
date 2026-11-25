@@ -16,7 +16,7 @@ from typing import Any
 import requests
 from pydantic import BaseModel, Field
 
-from src.config import Settings, now_wib, now_wib_str
+from src.config import Settings, now_wib, now_wib_str, sheet_url
 from src.gemini_client import GeminiClient
 from src.publishers import THREADS_API_BASE, _publish_single_threads_post, send_telegram_message
 from src.sheets_client import SheetsClient
@@ -225,6 +225,12 @@ def run_engagement_manager(
                 f"  ↳ <i>[{html.escape(item['status'])} | {html.escape(item['model'])}]</i>\n"
                 f"  <pre>{html.escape(item['reply'])}</pre>"
             )
+
+    if settings.google_sheet_id:
+        gs_link = sheet_url(settings.google_sheet_id)
+        lines.append(
+            f"\n📊 <a href=\"{html.escape(gs_link)}\">Buka Google Sheets (Antrean &amp; Komentar)</a>"
+        )
 
     tg_status, tg_detail = send_telegram_message(
         bot_token=settings.telegram_bot_token,

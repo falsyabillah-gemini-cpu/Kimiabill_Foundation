@@ -228,6 +228,7 @@ def format_publish_telegram_message(
     pending_remaining: int,
     min_stock: int,
     dry_run: bool,
+    sheet_link: str = "",
 ) -> str:
     """Bangun pesan Telegram rapi berisi status Threads + draf X siap tap-to-copy."""
     mode_badge = "🧪 DRY RUN" if dry_run else "🚀 LIVE RUN"
@@ -246,6 +247,12 @@ def format_publish_telegram_message(
     if pending_remaining < min_stock:
         stock_line += f" ⚠️ <i>(Di bawah batas minimum {min_stock}!)</i>"
 
+    sheet_footer = (
+        f"\n\n📊 <a href=\"{html.escape(sheet_link)}\">Buka Google Sheets (Antrean &amp; Laporan)</a>"
+        if sheet_link
+        else ""
+    )
+
     return (
         f"{header}\n"
         f"{stock_line}\n"
@@ -256,4 +263,5 @@ def format_publish_telegram_message(
         f"<pre>{html.escape(threads_reply_text)}</pre>\n\n"
         f"<b>𝕏 Draf X (Siap Copy-Paste):</b>\n"
         f"<pre>{html.escape(x_draft_post)}</pre>"
+        f"{sheet_footer}"
     )

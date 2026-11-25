@@ -34,6 +34,10 @@ def today_wib_str() -> str:
     return now_wib().strftime("%Y-%m-%d")
 
 
+def sheet_url(sheet_id: str) -> str:
+    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit"
+
+
 def _parse_bool(value: str | None, default: bool = False) -> bool:
     if value is None or value.strip() == "":
         return default

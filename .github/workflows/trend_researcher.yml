@@ -1,0 +1,41 @@
+name: "Kantor Agent 6 - Riset & Audit Threads (Tiap 3 Hari)"
+
+on:
+  schedule:
+    # 19:00 WIB (12:00 UTC) setiap 3 hari sekali (tgl 1,4,7,10,13,16,19,22,25,28,31)
+    - cron: "0 12 */3 * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Mode uji coba (tidak mengubah postingan, tetap menulis hasil riset ke Sheet & Telegram)"
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Agent 6 Threads Trend & Hook Researcher
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          THREADS_USER_ID: ${{ secrets.THREADS_USER_ID }}
+          THREADS_ACCESS_TOKEN: ${{ secrets.THREADS_ACCESS_TOKEN }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+        run: python -m src.main research

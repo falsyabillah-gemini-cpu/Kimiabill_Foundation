@@ -157,6 +157,7 @@ class GeminiClient:
         response_model: Type[T],
         temperature: float = 0.7,
         max_transient_retries: int = 2,
+        use_google_search: bool = False,
     ) -> tuple[T, GeminiCallMeta]:
         """Panggil Gemini dengan output JSON terstruktur & fallback otomatis ke model gratis tertinggi."""
         schema = response_model.model_json_schema()
@@ -189,16 +190,22 @@ class GeminiClient:
                         candidates.append(em)
 
             last_exc: Exception | None = None
+            allow_search_this_model = use_google_search
             for attempt in range(max_transient_retries + 1):
                 try:
+                    config_kwargs: dict[str, Any] = {
+                        "system_instruction": system_prompt,
+                        "temperature": temperature,
+                    }
+                    if allow_search_this_model:
+                        config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
+                    else:
+                        config_kwargs["response_mime_type"] = "application/json"
+
                     response = self._client.models.generate_content(
                         model=model_name,
                         contents=full_user_prompt,
-                        config=types.GenerateContentConfig(
-                            system_instruction=system_prompt,
-                            temperature=temperature,
-                            response_mime_type="application/json",
-                        ),
+                        config=types.GenerateContentConfig(**config_kwargs),
                     )
                     raw_text = getattr(response, "text", None) or ""
                     if not raw_text and getattr(response, "candidates", None):
@@ -225,6 +232,12 @@ class GeminiClient:
                         raise GeminiClientError(
                             "GEMINI_API_KEY tidak valid atau ditolak (HTTP 401)."
                         ) from exc
+
+                    # Jika model menolak google_search tool (400 INVALID_ARGUMENT), coba ulang tanpa grounding
+                    if allow_search_this_model and status_code == 400:
+                        allow_search_this_model = False
+                        notes.append(f"{model_name} tidak mendukung GoogleSearch tool, retry mode standar")
+                        continue
 
                     if _should_downgrade_immediately(status_code, reason):
                         self._exhausted_models.add(model_name)

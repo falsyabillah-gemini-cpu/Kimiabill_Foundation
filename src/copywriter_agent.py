@@ -1,8 +1,9 @@
 """Agent 2 — Copywriter & Quality Control (QC).
 
 Menggunakan Gemini (dimulai dari `gemini-4-hydrogen` dengan degradasi otomatis
-ke model gratis tertinggi) untuk membuat:
-1. Utas utama Meta Threads (gaya ngobrol santai, DILARANG mengandung link).
+ke model gratis tertinggi) serta menyerap laporan riset terbaru dari Agent 6
+(`Audit_Riset_Threads`) untuk membuat:
+1. Utas utama Meta Threads (gaya ngobrol human, DILARANG mengandung link/frasa robotik).
 2. Komentar balasan Threads berisi link Shopee Affiliate.
 3. Draf kurasi X siap copy-paste (dikirim ke Telegram).
 """
@@ -19,6 +20,16 @@ from src.sheets_client import ProductRow
 URL_LEAK_PATTERN = re.compile(
     r"(https?://\S+|www\.\S+|\b(?:s\.shopee\.co\.id|shopee\.co\.id|shp\.ee|bit\.ly|lynk\.id|tinyurl\.com|s\.id)/\S*)",
     re.IGNORECASE,
+)
+
+DEFAULT_ROBOTIC_PHRASES: tuple[str, ...] = (
+    "jangan lewatkan",
+    "miliki sekarang juga",
+    "buruan checkout sekarang",
+    "dapatkan segera",
+    "solusi terbaik untuk anda",
+    "klik link di bio sekarang",
+    "penawaran terbatas",
 )
 
 
@@ -52,10 +63,28 @@ def strip_leaked_links(text: str) -> tuple[str, bool]:
     return cleaned.strip(" \n\t-•"), True
 
 
+def parse_banned_phrases(raw_pantangan: str | None) -> list[str]:
+    phrases = list(DEFAULT_ROBOTIC_PHRASES)
+    if raw_pantangan:
+        for part in re.split(r"[;\n,]+", raw_pantangan):
+            clean = part.strip().lower()
+            if len(clean) >= 4 and clean not in phrases:
+                phrases.append(clean)
+    return phrases
+
+
+def find_robotic_phrases(text: str, banned_phrases: list[str]) -> list[str]:
+    low = (text or "").lower()
+    return [phrase for phrase in banned_phrases if phrase in low]
+
+
 def run_qc_and_sanitize(
-    draft: CopywritingDraft, affiliate_link: str
+    draft: CopywritingDraft,
+    affiliate_link: str,
+    *,
+    banned_phrases: list[str] | None = None,
 ) -> tuple[CopywritingDraft, bool, str]:
-    """Pastikan utas utama Threads bebas link bocor dan reply berisi link affiliate."""
+    """Pastikan utas utama Threads bebas link bocor & frasa robotik, dan reply berisi link affiliate."""
     notes: list[str] = []
     qc_clean = True
 
@@ -64,6 +93,13 @@ def run_qc_and_sanitize(
     if leaked:
         qc_clean = False
         notes.append("Link terdeteksi di utas utama Threads dan dibersihkan oleh QC")
+
+    robotic_hits = find_robotic_phrases(
+        main_post, banned_phrases or list(DEFAULT_ROBOTIC_PHRASES)
+    )
+    if robotic_hits:
+        qc_clean = False
+        notes.append(f"Terdeteksi frasa kaku/iklan ({', '.join(robotic_hits[:3])})")
 
     if len(main_post) > 495:
         main_post = main_post[:492].rstrip() + "..."
@@ -91,7 +127,7 @@ def run_qc_and_sanitize(
         x_draft_post=x_post,
     )
     if not notes:
-        notes.append("QC OK: bebas link bocor di utas utama & batas karakter aman")
+        notes.append("QC OK: bebas link bocor, gaya human terjaga & batas karakter aman")
     return sanitized, qc_clean, "; ".join(notes)
 
 
@@ -99,6 +135,8 @@ def generate_copywriting(
     gemini: GeminiClient,
     product: ProductRow,
     sheet_config: dict[str, str],
+    *,
+    audit_report: dict[str, str] | None = None,
 ) -> CopywritingResult:
     """Hasilkan draf Threads + balasan link + draf X dan jalankan QC."""
     niche = sheet_config.get(
@@ -115,6 +153,19 @@ def generate_copywriting(
     panggilan = sheet_config.get("Persona_Panggilan", "aku / kamu")
     link_bio = sheet_config.get("Link_Bio_Landing", "").strip()
 
+    audit_block = ""
+    banned_phrases = parse_banned_phrases(
+        (audit_report or {}).get("Pantangan_QC_Baru")
+    )
+    if audit_report:
+        audit_block = (
+            "\n\nBEKAL RISET THREADS TERBARU (WAJIB DIIKUTI):\n"
+            f"- Pola Hook Engagement Tinggi:\n{audit_report.get('Pola_Hook_Terbaik', '-')}\n"
+            f"- Pola Kalimat Human:\n{audit_report.get('Pola_Kalimat_Human', '-')}\n"
+            f"- Pola CTA ke Reply:\n{audit_report.get('Pola_CTA_Link_Reply', '-')}\n"
+            f"- Kata/Gaya Terlarang (Pantangan QC): {', '.join(banned_phrases[:15])}\n"
+        )
+
     system_prompt = (
         "Kamu adalah Copywriter Affiliate spesialis Meta Threads dan X di Indonesia.\n"
         f"Niche utama: {niche}\n"
@@ -123,9 +174,10 @@ def generate_copywriting(
         f"Sapaan: {panggilan}\n\n"
         "ATURAN KETAT:\n"
         "1. `threads_main_post`: DILARANG KERAS menulis URL/link apa pun (termasuk shopee.co.id, s.shopee, bit.ly, dll). "
-        "Mulai dengan hook masalah sehari-hari yang relate, ceritakan solusi jujurnya, akhiri dengan ajakan ringan cek komentar/reply. Maks 450 karakter.\n"
+        "Mulai dengan hook masalah sehari-hari yang relate, ceritakan solusi jujurnya dengan bahasa sangat human, akhiri dengan ajakan ringan cek komentar/reply. Maks 450 karakter.\n"
         "2. `threads_reply_text`: Komentar balasan ramah dari penulis yang menyertakan `link_affiliate` secara natural.\n"
         "3. `x_draft_post`: Gaya kurasi X yang ringkas, pakai 2-3 poin singkat + harga kisaran (jika ada) + `link_affiliate`. Maks 270 karakter."
+        f"{audit_block}"
     )
 
     payload = {
@@ -141,7 +193,7 @@ def generate_copywriting(
     user_prompt = (
         "Buatkan paket copywriting untuk produk berikut:\n"
         f"{payload}\n"
-        "Ingat: `threads_main_post` TIDAK BOLEH mengandung URL atau domain apa pun."
+        "Ingat: `threads_main_post` TIDAK BOLEH mengandung URL/domain ataupun bahasa iklan kaku ala robot."
     )
 
     raw_draft, meta = gemini.generate_structured(
@@ -151,23 +203,25 @@ def generate_copywriting(
         temperature=0.75,
     )
 
-    sanitized, qc_ok, qc_note = run_qc_and_sanitize(raw_draft, product.link_affiliate)
+    sanitized, qc_ok, qc_note = run_qc_and_sanitize(
+        raw_draft, product.link_affiliate, banned_phrases=banned_phrases
+    )
 
-    # Jika model pertama sempat membocorkan link ke utas utama, beri 1 kesempatan regenerasi QC
+    # Jika QC mendeteksi link bocor atau frasa robotik, beri 1 kesempatan regenerasi QC
     if not qc_ok:
         try:
             retry_draft, retry_meta = gemini.generate_structured(
                 system_prompt=system_prompt,
                 user_prompt=(
-                    f"{user_prompt}\n\nPERINGATAN QC: Draft sebelumnya masih mengandung URL di "
-                    "`threads_main_post`. Hapus seluruh URL dari `threads_main_post`, letakkan link "
-                    "HANYA di `threads_reply_text` dan `x_draft_post`."
+                    f"{user_prompt}\n\nPERINGATAN QC ({qc_note}): "
+                    "Perbaiki `threads_main_post` agar bebas URL sama sekali DAN tidak memakai kalimat iklan kaku. "
+                    "Letakkan link HANYA di `threads_reply_text` dan `x_draft_post`."
                 ),
                 response_model=CopywritingDraft,
                 temperature=0.5,
             )
             sanitized2, qc_ok2, qc_note2 = run_qc_and_sanitize(
-                retry_draft, product.link_affiliate
+                retry_draft, product.link_affiliate, banned_phrases=banned_phrases
             )
             return CopywritingResult(
                 draft=sanitized2,

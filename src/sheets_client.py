@@ -15,6 +15,8 @@ TAB_ANTREAN = "Antrean_Produk"
 TAB_LOG = "Log_Performa"
 TAB_KOMENTAR = "Komentar_Threads"
 TAB_PENGATURAN = "Pengaturan_Agent"
+TAB_REFERENSI = "Referensi_Viral_Threads"
+TAB_AUDIT = "Audit_Riset_Threads"
 
 
 @dataclass
@@ -276,6 +278,51 @@ class SheetsClient:
             values=[row_values],
             value_input_option="USER_ENTERED",
         )
+
+    def list_active_viral_references(self, limit: int = 15) -> list[dict[str, str]]:
+        """Ambil contoh postingan viral berstatus `AKTIF` dari `Referensi_Viral_Threads`."""
+        try:
+            _, headers, data_rows = self._read_table(TAB_REFERENSI)
+        except Exception:
+            return []
+        refs: list[dict[str, str]] = []
+        for raw in reversed(data_rows):
+            if not any(c.strip() for c in raw):
+                continue
+            item = self._row_to_dict(headers, raw)
+            if item.get("Status_Riset", "").upper() == "AKTIF" and item.get("Teks_Postingan_Contoh"):
+                refs.append(item)
+                if len(refs) >= limit:
+                    break
+        return refs
+
+    def append_audit_report(self, entry: dict[str, str]) -> None:
+        """Simpan laporan audit riset baru ke tab `Audit_Riset_Threads`."""
+        ws, headers, data_rows = self._read_table(TAB_AUDIT)
+        row_values = [entry.get(h, "") for h in headers]
+        target_row = self._first_empty_row(data_rows)
+        end_col = _col_letter(len(headers))
+        ws.update(
+            range_name=f"A{target_row}:{end_col}{target_row}",
+            values=[row_values],
+            value_input_option="USER_ENTERED",
+        )
+
+    def get_latest_active_audit(self) -> dict[str, str] | None:
+        """Ambil laporan audit riset terbaru yang berstatus `AKTIF_DIPAKAI` untuk Agent 2."""
+        try:
+            _, headers, data_rows = self._read_table(TAB_AUDIT)
+        except Exception:
+            return None
+        for raw in reversed(data_rows):
+            if not any(c.strip() for c in raw):
+                continue
+            item = self._row_to_dict(headers, raw)
+            status = item.get("Status_Feed_Copywriter", "").upper()
+            if status in ("AKTIF_DIPAKAI", ""):
+                if item.get("Pola_Hook_Terbaik") or item.get("Pola_Kalimat_Human"):
+                    return item
+        return None
 
     @staticmethod
     def _first_empty_row(data_rows: list[list[str]]) -> int:
