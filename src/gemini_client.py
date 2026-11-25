@@ -129,7 +129,7 @@ class GeminiClient:
         self._sleep = sleep_fn
 
     def _discover_available_free_flash(self, already_tried: set[str]) -> list[str]:
-        """Cari model Gemini Flash lain lewat API models.list jika daftar statis gagal semua."""
+        """Cari model Gemini/Gemma lain lewat API models.list jika daftar statis gagal semua."""
         try:
             discovered: list[str] = []
             for m in self._client.models.list():
@@ -140,12 +140,15 @@ class GeminiClient:
                 )
                 if methods and "generateContent" not in methods:
                     continue
-                if name.startswith("gemini-") and "flash" in name:
-                    if not any(s in name for s in ("tts", "image", "audio", "live", "embedding")):
+                if name.startswith(("gemini-", "gemma-")):
+                    if not any(s in name for s in ("tts", "image", "audio", "live", "embedding", "robotics", "veo", "imagen")):
                         if name not in already_tried and name not in self._exhausted_models:
                             discovered.append(name)
-            discovered.sort(key=lambda n: ("lite" not in n, "preview" not in n, n), reverse=True)
-            return discovered[:3]
+            discovered.sort(
+                key=lambda n: ("flash" in n, "lite" not in n, "preview" not in n, n),
+                reverse=True,
+            )
+            return discovered[:8]
         except Exception:
             return []
 
@@ -167,104 +170,106 @@ class GeminiClient:
             f"{json.dumps(schema, ensure_ascii=False)}"
         )
 
-        candidates = [m for m in self.fallback_chain if m not in self._exhausted_models]
-        if not candidates:
-            candidates = list(self.fallback_chain)
-
-        attempted: list[str] = []
+        # Jika GoogleSearch grounding dibatasi kuota (sering 429 di free tier),
+        # otomatis lakukan putaran kedua tanpa GoogleSearch grounding sebelum menyerah.
+        search_modes = (True, False) if use_google_search else (False,)
+        all_attempted: list[str] = []
         notes: list[str] = []
-        discovered_added = False
 
-        idx = 0
-        while idx < len(candidates):
-            model_name = candidates[idx]
-            idx += 1
-            attempted.append(model_name)
+        for search_enabled in search_modes:
+            candidates = [m for m in self.fallback_chain if m not in self._exhausted_models]
+            if not candidates:
+                candidates = list(self.fallback_chain)
+            if not search_enabled and use_google_search:
+                # Reset cache hanya untuk mencoba ulang tanpa grounding tool
+                candidates = list(self.fallback_chain)
 
-            # Jika semua model statis habis, coba discovery dinamis sekali
-            if idx == len(candidates) and not discovered_added:
-                discovered_added = True
-                extra = self._discover_available_free_flash(set(candidates) | set(attempted))
-                for em in extra:
-                    if em not in candidates:
-                        candidates.append(em)
+            discovered_added = False
+            idx = 0
+            while idx < len(candidates):
+                model_name = candidates[idx]
+                idx += 1
+                all_attempted.append(model_name)
 
-            last_exc: Exception | None = None
-            allow_search_this_model = use_google_search
-            for attempt in range(max_transient_retries + 1):
-                try:
-                    config_kwargs: dict[str, Any] = {
-                        "system_instruction": system_prompt,
-                        "temperature": temperature,
-                    }
-                    if allow_search_this_model:
-                        config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
-                    else:
-                        config_kwargs["response_mime_type"] = "application/json"
+                if idx == len(candidates) and not discovered_added:
+                    discovered_added = True
+                    extra = self._discover_available_free_flash(set(candidates) | set(all_attempted))
+                    for em in extra:
+                        if em not in candidates:
+                            candidates.append(em)
 
-                    response = self._client.models.generate_content(
-                        model=model_name,
-                        contents=full_user_prompt,
-                        config=types.GenerateContentConfig(**config_kwargs),
-                    )
-                    raw_text = getattr(response, "text", None) or ""
-                    if not raw_text and getattr(response, "candidates", None):
-                        parts = response.candidates[0].content.parts
-                        raw_text = "".join(getattr(p, "text", "") or "" for p in parts)
-                    parsed_dict = extract_json_object(raw_text)
-                    parsed_obj = response_model.model_validate(parsed_dict)
+                allow_search_this_model = search_enabled
+                for attempt in range(max_transient_retries + 1):
+                    try:
+                        config_kwargs: dict[str, Any] = {
+                            "system_instruction": system_prompt,
+                            "temperature": temperature,
+                        }
+                        if allow_search_this_model:
+                            config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
+                        else:
+                            config_kwargs["response_mime_type"] = "application/json"
 
-                    used_fallback = model_name != self.primary_model
-                    meta = GeminiCallMeta(
-                        requested_model=self.primary_model,
-                        actual_model=model_name,
-                        used_fallback=used_fallback,
-                        attempted_models=tuple(attempted),
-                        fallback_notes=" | ".join(notes),
-                    )
-                    return parsed_obj, meta
-
-                except Exception as exc:
-                    last_exc = exc
-                    status_code, reason = _classify_error(exc)
-
-                    if status_code == 401:
-                        raise GeminiClientError(
-                            "GEMINI_API_KEY tidak valid atau ditolak (HTTP 401)."
-                        ) from exc
-
-                    # Jika model menolak google_search tool (400 INVALID_ARGUMENT), coba ulang tanpa grounding
-                    if allow_search_this_model and status_code == 400:
-                        allow_search_this_model = False
-                        notes.append(f"{model_name} tidak mendukung GoogleSearch tool, retry mode standar")
-                        continue
-
-                    if _should_downgrade_immediately(status_code, reason):
-                        self._exhausted_models.add(model_name)
-                        msg = f"{model_name} -> {reason}"
-                        notes.append(msg)
-                        print(f"[gemini] {msg}. Menurunkan ke model berikutnya...")
-                        break
-
-                    if _is_transient(status_code) and attempt < max_transient_retries:
-                        wait_s = min(6, 2 * (attempt + 1))
-                        print(
-                            f"[gemini] {model_name} gangguan sementara ({reason}), "
-                            f"coba ulang dalam {wait_s}s..."
+                        response = self._client.models.generate_content(
+                            model=model_name,
+                            contents=full_user_prompt,
+                            config=types.GenerateContentConfig(**config_kwargs),
                         )
-                        self._sleep(wait_s)
-                        continue
+                        raw_text = getattr(response, "text", None) or ""
+                        if not raw_text and getattr(response, "candidates", None):
+                            parts = response.candidates[0].content.parts
+                            raw_text = "".join(getattr(p, "text", "") or "" for p in parts)
+                        parsed_dict = extract_json_object(raw_text)
+                        parsed_obj = response_model.model_validate(parsed_dict)
 
-                    # Error lain (mis. parsing JSON atau transient habis) -> coba model berikutnya
-                    msg = f"{model_name} gagal ({reason})"
-                    notes.append(msg)
-                    print(f"[gemini] {msg}. Beralih ke model berikutnya...")
-                    break
+                        used_fallback = model_name != self.primary_model or (
+                            use_google_search and not allow_search_this_model
+                        )
+                        meta = GeminiCallMeta(
+                            requested_model=self.primary_model,
+                            actual_model=model_name,
+                            used_fallback=used_fallback,
+                            attempted_models=tuple(dict.fromkeys(all_attempted)),
+                            fallback_notes=" | ".join(notes),
+                        )
+                        return parsed_obj, meta
 
-            if last_exc is not None and idx >= len(candidates):
-                break
+                    except Exception as exc:
+                        status_code, reason = _classify_error(exc)
+
+                        if status_code == 401:
+                            raise GeminiClientError(
+                                "GEMINI_API_KEY tidak valid atau ditolak (HTTP 401)."
+                            ) from exc
+
+                        if allow_search_this_model and status_code in (400, 403):
+                            allow_search_this_model = False
+                            notes.append(f"{model_name} tanpa GoogleSearch ({reason})")
+                            continue
+
+                        if _should_downgrade_immediately(status_code, reason):
+                            if not search_enabled:
+                                self._exhausted_models.add(model_name)
+                            msg = f"{model_name}{' [search]' if allow_search_this_model else ''} -> {reason}"
+                            notes.append(msg)
+                            print(f"[gemini] {msg}. Menurunkan ke model berikutnya...")
+                            break
+
+                        if _is_transient(status_code) and attempt < max_transient_retries:
+                            wait_s = min(6, 2 * (attempt + 1))
+                            print(
+                                f"[gemini] {model_name} gangguan sementara ({reason}), "
+                                f"coba ulang dalam {wait_s}s..."
+                            )
+                            self._sleep(wait_s)
+                            continue
+
+                        msg = f"{model_name} gagal ({reason})"
+                        notes.append(msg)
+                        print(f"[gemini] {msg}. Beralih ke model berikutnya...")
+                        break
 
         raise GeminiClientError(
             "Semua model Gemini dalam rantai fallback gagal digunakan. "
-            f"Dicoba: {', '.join(attempted)}. Detail: {' | '.join(notes)}"
+            f"Dicoba: {', '.join(dict.fromkeys(all_attempted))}. Detail: {' | '.join(notes)}"
         )

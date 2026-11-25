@@ -13,7 +13,10 @@ Tugas (berjalan tiap 3 hari sekali & bisa dipicu manual):
 from __future__ import annotations
 
 import html
+import re
+import xml.etree.ElementTree as ET
 from typing import Any
+from urllib.parse import quote_plus
 
 import requests
 from pydantic import BaseModel, Field
@@ -46,6 +49,37 @@ class ThreadsAuditReport(BaseModel):
     ringkasan_eksekutif: str = Field(
         description="Ringkasan audit 3-5 kalimat berisi temuan utama agar mudah dibaca user di Telegram & Sheets"
     )
+
+
+def fetch_web_trend_snippets(
+    *,
+    queries: tuple[str, ...] = (
+        "threads shopee affiliate hook viral indonesia",
+        "strategi engagement threads jualan affiliate",
+    ),
+    http_get: Any = requests.get,
+) -> list[str]:
+    """Ambil cuplikan artikel/diskusi publik dari Google News RSS (gratis, tanpa API key)."""
+    snippets: list[str] = []
+    for q in queries[:2]:
+        try:
+            url = (
+                f"https://news.google.com/rss/search?q={quote_plus(q)}"
+                "&hl=id&gl=ID&ceid=ID:id"
+            )
+            resp = http_get(url, timeout=15)
+            if resp.status_code != 200 or not getattr(resp, "text", ""):
+                continue
+            root = ET.fromstring(resp.text)
+            for item in root.findall(".//item")[:5]:
+                title = (item.findtext("title") or "").strip()
+                desc = re.sub(r"<[^>]+>", " ", item.findtext("description") or "").strip()
+                desc = re.sub(r"\s+", " ", desc)
+                if title:
+                    snippets.append(f"{title} — {desc[:160]}" if desc else title)
+        except Exception:
+            continue
+    return snippets[:10]
 
 
 def fetch_own_threads_performance(
@@ -150,6 +184,7 @@ def run_trend_researcher(
     niche = sheet_config.get(
         "Niche_Utama", "Gadget Meja Kerja & Perlengkapan Kos/Rumah Tangga"
     )
+    gs_link = sheet_url(settings.google_sheet_id)
 
     own_posts = fetch_own_threads_performance(
         user_id=settings.threads_user_id,
@@ -160,9 +195,12 @@ def run_trend_researcher(
         access_token=settings.threads_access_token,
         http_get=http_get,
     )
+    web_snippets = fetch_web_trend_snippets(http_get=http_get)
     sheet_refs = sheets.list_active_viral_references(limit=12)
 
-    sources_used = ["Gemini Search Grounding (Internet & Threads Publik)"]
+    sources_used = ["Gemini Search Grounding & Analisis Pola Threads"]
+    if web_snippets:
+        sources_used.append(f"Web/News Snippets ({len(web_snippets)})")
     if own_posts:
         sources_used.append(f"Performa Akun Sendiri ({len(own_posts)} post)")
     if api_samples:
@@ -175,8 +213,8 @@ def run_trend_researcher(
         "khusus niche affiliate Shopee.\n"
         f"Niche fokus: {niche}\n"
         "Tugasmu:\n"
-        "1. Gunakan pencarian web/internet untuk mengamati pola akun affiliate Threads Indonesia "
-        "yang mendapatkan engagement tinggi (likes, replies, clicks).\n"
+        "1. Amati pola akun affiliate Threads Indonesia yang mendapatkan engagement tinggi "
+        "(likes, replies, clicks) dari data riset internet, performa akun, dan referensi viral.\n"
         "2. Bedah struktur hook 1-2 kalimat pertama, gaya bahasa yang terasa sangat *human* "
         "(seperti curhat/rekomendasi teman sendiri, ada konteks masalah nyata, bukan bahasa brosur AI), "
         "serta teknik transisi CTA agar orang mau membuka kolom balasan tempat link Shopee ditaruh.\n"
@@ -186,6 +224,7 @@ def run_trend_researcher(
     user_prompt = (
         "Lakukan riset & audit pola konten affiliate Threads Indonesia saat ini.\n"
         f"Kata kunci referensi pencarian internet: {', '.join(DEFAULT_RESEARCH_KEYWORDS)}.\n\n"
+        f"Cuplikan artikel/diskusi web terbaru:\n{web_snippets[:8]}\n\n"
         f"Data performa postingan akun sendiri:\n{own_posts[:8]}\n\n"
         f"Sampel dari Threads Keyword Search API:\n{api_samples[:8]}\n\n"
         f"Contoh postingan viral yang dikumpulkan user:\n{sheet_refs[:8]}\n\n"
@@ -193,13 +232,26 @@ def run_trend_researcher(
         "sistem prompt bagi Agent Copywriter dan daftar pantangan bagi Agent QC."
     )
 
-    report, meta = gemini.generate_structured(
-        system_prompt=system_prompt,
-        user_prompt=user_prompt,
-        response_model=ThreadsAuditReport,
-        temperature=0.5,
-        use_google_search=True,
-    )
+    try:
+        report, meta = gemini.generate_structured(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            response_model=ThreadsAuditReport,
+            temperature=0.5,
+            use_google_search=True,
+        )
+    except Exception as exc:
+        send_telegram_message(
+            bot_token=settings.telegram_bot_token,
+            chat_id=settings.telegram_chat_id,
+            html_text=(
+                f"⚠️ <b>Agent 6 (Riset Threads) Gagal Sementara:</b>\n"
+                f"<code>{html.escape(str(exc)[:500])}</code>\n\n"
+                f"📊 <a href=\"{html.escape(gs_link)}\">Buka Google Sheets</a>"
+            ),
+            http_post=http_post,
+        )
+        raise
 
     now_str = now_wib_str()
     pantangan_str = "; ".join(p.strip() for p in report.pantangan_qc if p.strip())
@@ -220,7 +272,6 @@ def run_trend_researcher(
         }
     )
 
-    gs_link = sheet_url(settings.google_sheet_id)
     tg_html = (
         f"🔎 <b>LAPORAN AUDIT AGENT 6 — Riset Threads (Tiap 3 Hari)</b>\n"
         f"<b>Waktu:</b> {html.escape(now_str)}\n"
