@@ -147,20 +147,34 @@ def run_engagement_manager(
                 if "shopee.co.id" in text.lower() or "s.shopee" in text.lower():
                     continue
 
-                suggestion_obj, meta = gemini.generate_structured(
-                    system_prompt=(
-                        "Kamu Admin Komentar Meta Threads yang ramah dan membantu.\n"
-                        f"Gaya bahasa: {gaya}\nSapaan: {persona}\n"
-                        "Tugas: Balas komentar audiens secara singkat, natural, tidak kaku, "
-                        "dan arahkan cek komentar link produk jika mereka menanyakan link/harga."
-                    ),
-                    user_prompt=(
-                        f"Produk yang dibahas: {product_name}\n"
-                        f"Komentar dari @{username}: {text}"
-                    ),
-                    response_model=CommentReplySuggestion,
-                    temperature=0.7,
-                )
+                try:
+                    suggestion_obj, meta = gemini.generate_structured(
+                        system_prompt=(
+                            "Kamu Admin Komentar Meta Threads yang ramah dan membantu.\n"
+                            f"Gaya bahasa: {gaya}\nSapaan: {persona}\n"
+                            "Tugas: Balas komentar audiens secara singkat, natural, tidak kaku, "
+                            "dan arahkan cek komentar link produk jika mereka menanyakan link/harga."
+                        ),
+                        user_prompt=(
+                            f"Produk yang dibahas: {product_name}\n"
+                            f"Komentar dari @{username}: {text}"
+                        ),
+                        response_model=CommentReplySuggestion,
+                        temperature=0.7,
+                    )
+                except Exception as exc:
+                    alerts.append(
+                        f"⚠️ <b>Gemini Error</b> saat buat balasan komentar @{html.escape(username)}: "
+                        f"<code>{html.escape(str(exc)[:220])}</code>"
+                    )
+                    continue
+
+                q_warn = meta.quota_warning_message()
+                if q_warn:
+                    warn_html = f"⚠️ <b>Peringatan Kuota Gemini:</b> {html.escape(q_warn)}"
+                    if warn_html not in alerts:
+                        alerts.append(warn_html)
+
                 reply_text = suggestion_obj.reply_text.strip()
                 status_balasan = "MENUNGGU_BALASAN"
 

@@ -272,11 +272,19 @@ def run_trend_researcher(
         }
     )
 
+    q_warn = meta.quota_warning_message()
+    quota_block = (
+        f"\n⚠️ <b>PERINGATAN KUOTA GEMINI:</b> {html.escape(q_warn)}\n"
+        if q_warn
+        else ""
+    )
+
     tg_html = (
         f"🔎 <b>LAPORAN AUDIT AGENT 6 — Riset Threads (Tiap 3 Hari)</b>\n"
         f"<b>Waktu:</b> {html.escape(now_str)}\n"
         f"<b>Model AI:</b> <code>{html.escape(model_label)}</code>\n"
-        f"<b>Sumber:</b> {html.escape(sumber_str)}\n\n"
+        f"<b>Sumber:</b> {html.escape(sumber_str)}\n"
+        f"{quota_block}\n"
         f"<b>Ringkasan Temuan:</b>\n{html.escape(report.ringkasan_eksekutif)}\n\n"
         f"<b>Pola Hook Terbaik (Di-feed ke Copywriter):</b>\n"
         f"<pre>{html.escape(report.pola_hook_terbaik[:1200])}</pre>\n\n"

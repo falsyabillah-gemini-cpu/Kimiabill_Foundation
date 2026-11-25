@@ -577,3 +577,44 @@ def test_agent6_trend_researcher_feeds_copywriter_and_adds_sheet_link() -> None:
     assert "https://docs.google.com/spreadsheets/d/sheet-123/edit" in tg_pub
 
 
+def test_gemini_low_quota_warning_triggered_and_formatted() -> None:
+    fake = _FakeGenAIClient(
+        {
+            "gemini-4-hydrogen": [RuntimeError("429 RESOURCE_EXHAUSTED")],
+            "gemini-3.8-flash": [RuntimeError("429 RESOURCE_EXHAUSTED")],
+            "gemini-3.6-flash": [{"answer": "ok"}],
+        }
+    )
+    client = GeminiClient(
+        "dummy-key",
+        primary_model="gemini-4-hydrogen",
+        fallback_chain=("gemini-4-hydrogen", "gemini-3.8-flash", "gemini-3.6-flash"),
+        client=fake,
+        sleep_fn=lambda _: None,
+    )
+    _, meta = client.generate_structured(
+        system_prompt="s", user_prompt="u", response_model=_SampleOut
+    )
+    warn = meta.quota_warning_message()
+    assert warn is not None
+    assert "GEMINI_API_KEY baru" in warn
+
+    msg = format_publish_telegram_message(
+        product_name="Kabel Klip",
+        kategori="Meja",
+        threads_result=SimpleNamespace(status="PUBLISHED", permalink="", error_message=""),
+        threads_main_post="Main",
+        threads_reply_text="Reply",
+        x_draft_post="X",
+        model_label=meta.display_label(),
+        qc_notes="OK",
+        pending_remaining=10,
+        min_stock=5,
+        dry_run=False,
+        quota_warning=warn,
+    )
+    assert "PERINGATAN KUOTA GEMINI" in msg
+    assert "Kimiabill_Project" in msg
+
+
+

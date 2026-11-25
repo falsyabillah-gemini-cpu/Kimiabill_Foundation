@@ -135,6 +135,7 @@ def run_publish_pipeline(
         min_stock=min_stock,
         dry_run=settings.dry_run,
         sheet_link=gs_link,
+        quota_warning=copy_res.meta.quota_warning_message(),
     )
     tg_status, tg_detail = send_telegram_message(
         bot_token=settings.telegram_bot_token,

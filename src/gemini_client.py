@@ -32,11 +32,25 @@ class GeminiCallMeta:
     used_fallback: bool
     attempted_models: tuple[str, ...]
     fallback_notes: str
+    rate_limited_count: int = 0
 
     def display_label(self) -> str:
         if self.used_fallback:
             return f"{self.actual_model} (fallback dari {self.requested_model})"
         return self.actual_model
+
+    def quota_warning_message(self) -> str | None:
+        low_tier = self.used_fallback and (
+            "lite" in self.actual_model.lower()
+            or self.actual_model.lower().startswith("gemma-")
+        )
+        if self.rate_limited_count >= 2 or low_tier:
+            return (
+                f"Kuota Gemini API mulai menipis ({self.rate_limited_count}x limit 429, "
+                f"aktif di {self.actual_model}). Disarankan buat GEMINI_API_KEY baru di "
+                "Google Cloud Project terpisah dari Kimiabill_Project sebagai cadangan."
+            )
+        return None
 
 
 def extract_json_object(text: str) -> dict[str, Any]:
@@ -175,6 +189,7 @@ class GeminiClient:
         search_modes = (True, False) if use_google_search else (False,)
         all_attempted: list[str] = []
         notes: list[str] = []
+        standard_429_models: set[str] = set()
 
         for search_enabled in search_modes:
             candidates = [m for m in self.fallback_chain if m not in self._exhausted_models]
@@ -231,6 +246,7 @@ class GeminiClient:
                             used_fallback=used_fallback,
                             attempted_models=tuple(dict.fromkeys(all_attempted)),
                             fallback_notes=" | ".join(notes),
+                            rate_limited_count=len(standard_429_models),
                         )
                         return parsed_obj, meta
 
@@ -250,6 +266,8 @@ class GeminiClient:
                         if _should_downgrade_immediately(status_code, reason):
                             if not search_enabled:
                                 self._exhausted_models.add(model_name)
+                                if status_code == 429:
+                                    standard_429_models.add(model_name)
                             msg = f"{model_name}{' [search]' if allow_search_this_model else ''} -> {reason}"
                             notes.append(msg)
                             print(f"[gemini] {msg}. Menurunkan ke model berikutnya...")

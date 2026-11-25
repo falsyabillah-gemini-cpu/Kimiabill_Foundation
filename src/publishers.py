@@ -229,6 +229,7 @@ def format_publish_telegram_message(
     min_stock: int,
     dry_run: bool,
     sheet_link: str = "",
+    quota_warning: str | None = None,
 ) -> str:
     """Bangun pesan Telegram rapi berisi status Threads + draf X siap tap-to-copy."""
     mode_badge = "🧪 DRY RUN" if dry_run else "🚀 LIVE RUN"
@@ -247,6 +248,12 @@ def format_publish_telegram_message(
     if pending_remaining < min_stock:
         stock_line += f" ⚠️ <i>(Di bawah batas minimum {min_stock}!)</i>"
 
+    quota_block = (
+        f"\n⚠️ <b>PERINGATAN KUOTA GEMINI:</b> {html.escape(quota_warning)}"
+        if quota_warning
+        else ""
+    )
+
     sheet_footer = (
         f"\n\n📊 <a href=\"{html.escape(sheet_link)}\">Buka Google Sheets (Antrean &amp; Laporan)</a>"
         if sheet_link
@@ -255,7 +262,8 @@ def format_publish_telegram_message(
 
     return (
         f"{header}\n"
-        f"{stock_line}\n"
+        f"{stock_line}"
+        f"{quota_block}\n"
         f"<b>QC:</b> {html.escape(qc_notes)}\n\n"
         f"<b>🧵 Draf Threads (Utas Utama):</b>\n"
         f"<pre>{html.escape(threads_main_post)}</pre>\n\n"
