@@ -14,20 +14,41 @@ DEFAULT_GEMINI_PRIMARY_MODEL = "gemini-4-hydrogen"
 DEFAULT_GEMINI_FALLBACK_CHAIN: tuple[str, ...] = (
     "gemini-4-hydrogen",
     "gemini-3.8-flash",
+    "gemini-3.7-flash",
     "gemini-3.6-flash",
     "gemini-3.5-flash",
     "gemini-3.5-flash-lite",
-    "gemini-2.5-pro",
-    "gemini-2.5-flash-lite",
 )
 
 DEFAULT_OPENROUTER_FALLBACK_MODELS: tuple[str, ...] = (
-    "google/gemini-2.5-flash",
-    "google/gemini-2.5-flash-lite",
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "qwen/qwen-2.5-72b-instruct:free",
+    "google/gemma-4-31b-it:free",
+    "google/gemma-4-26b-a4b-it:free",
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "google/gemini-3.8-flash",
+    "google/gemini-3.5-flash-lite",
     "openrouter/free",
 )
+
+AFFILIATE_CONTENT_TYPE = "SOFT_AFFILIATE"
+ORGANIC_CONTENT_TYPES: tuple[str, ...] = (
+    "ORGANIK_OPINI",
+    "ORGANIK_TIPS",
+    "ORGANIK_DISKUSI",
+)
+VALID_CONTENT_TYPES: tuple[str, ...] = (AFFILIATE_CONTENT_TYPE, *ORGANIC_CONTENT_TYPES)
+
+
+def normalize_content_type(raw: str | None) -> str:
+    """Normalisasi nilai kolom `Tipe_Konten` (kosong -> `SOFT_AFFILIATE`)."""
+    cleaned = (raw or "").strip().upper()
+    if cleaned in VALID_CONTENT_TYPES:
+        return cleaned
+    return AFFILIATE_CONTENT_TYPE
+
+
+def is_organic_content_type(raw: str | None) -> bool:
+    return normalize_content_type(raw) in ORGANIC_CONTENT_TYPES
+
 
 
 def now_wib() -> datetime:

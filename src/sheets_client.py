@@ -9,6 +9,8 @@ from typing import Any
 import gspread
 from google.oauth2.service_account import Credentials
 
+from src.config import AFFILIATE_CONTENT_TYPE, normalize_content_type
+
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 TAB_ANTREAN = "Antrean_Produk"
@@ -33,6 +35,8 @@ class ProductRow:
     url_foto_publik: str = ""
     catatan_user_untuk_ai: str = ""
     sumber: str = "SHEET_MANUAL"
+    tipe_konten: str = AFFILIATE_CONTENT_TYPE
+
 
 
 def _load_credentials(service_account_source: str) -> Credentials:
@@ -135,6 +139,7 @@ class SheetsClient:
                     url_foto_publik=item.get("URL_Foto_Publik", ""),
                     catatan_user_untuk_ai=item.get("Catatan_User_untuk_AI", ""),
                     sumber=item.get("Sumber", "") or "SHEET_MANUAL",
+                    tipe_konten=normalize_content_type(item.get("Tipe_Konten", "")),
                 )
             )
         return products
@@ -151,6 +156,8 @@ class SheetsClient:
 
     def update_queue_row_fields(self, row_number: int, updates: dict[str, str]) -> None:
         """Update kolom spesifik berdasarkan nama header pada baris `row_number`."""
+        if row_number <= 0:
+            return
         ws, headers, _ = self._read_table(TAB_ANTREAN)
         batch_payload: list[dict[str, Any]] = []
         for col_name, value in updates.items():
@@ -175,10 +182,12 @@ class SheetsClient:
         catatan_user_untuk_ai: str = "",
         sumber: str = "SHOPEE_AUTO_HUNTER",
         catatan_agent: str = "",
+        tipe_konten: str = AFFILIATE_CONTENT_TYPE,
     ) -> ProductRow:
         """Tambahkan produk baru ke baris kosong pertama di `Antrean_Produk`."""
         ws, headers, data_rows = self._read_table(TAB_ANTREAN)
         product_id = self.next_product_id()
+        normalized_type = normalize_content_type(tipe_konten)
         values_by_col = {
             "ID": product_id,
             "Status": status,
@@ -195,6 +204,7 @@ class SheetsClient:
             "Link_Post_Threads": "",
             "Model_AI_Dipakai": "",
             "Catatan_Agent": catatan_agent,
+            "Tipe_Konten": normalized_type,
         }
         row_values = [values_by_col.get(h, "") for h in headers]
 
@@ -225,6 +235,7 @@ class SheetsClient:
             url_foto_publik=url_foto_publik,
             catatan_user_untuk_ai=catatan_user_untuk_ai,
             sumber=sumber,
+            tipe_konten=normalized_type,
         )
 
     def append_performance_log(self, entry: dict[str, str]) -> None:
@@ -339,6 +350,27 @@ class SheetsClient:
             if len(logs) >= limit:
                 break
         return logs
+
+    def list_recent_log_context(self, limit: int = 10) -> list[dict[str, str]]:
+        """Ambil ringkasan `limit` naskah & tipe konten terakhir dari `Log_Performa`."""
+        logs = self.list_performance_logs(limit=max(limit * 2, limit))
+        results: list[dict[str, str]] = []
+        for entry in logs:
+            draft = entry.get("Draft_Threads", "").strip()
+            if not draft:
+                continue
+            results.append(
+                {
+                    "tanggal_wib": entry.get("Tanggal_WIB", ""),
+                    "tipe_konten": normalize_content_type(entry.get("Tipe_Konten", "")),
+                    "status_threads": entry.get("Status_Threads", ""),
+                    "draft_threads": draft,
+                    "nama_produk": entry.get("Nama_Produk", ""),
+                }
+            )
+            if len(results) >= limit:
+                break
+        return results
 
     def list_comment_rows(self, limit: int = 50) -> list[dict[str, str]]:
         """Ambil daftar komentar terbaru dari `Komentar_Threads`."""

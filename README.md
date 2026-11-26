@@ -1,27 +1,60 @@
-# Kantor Agent Affiliate Online (Dual Threads + X)
+# Kimiabill Foundation — Kantor Agent Affiliate (Anti-Bot & Humanized Threads)
 
-Kantor otomatis berbasis **GitHub Actions + Python + Gemini 4 Hydrogen (dengan degradasi otomatis ke model gratis tertinggi) + Google Sheets** untuk niche **Gadget Meja Kerja & Perlengkapan Kos/Rumah Tangga**.
+Sistem automasi konten Meta Threads, kurasi X, dan laporan operasional via Telegram + Google Sheets yang dirancang agar akun tampil natural seperti pengguna manusia asli (anti-bot & anti-spam).
 
-## Susunan Agent
-1. **Agent 1 (`src/shopee_hunter.py`) — Product Hunter:** Membaca antrean produk `PENDING` dari Google Sheets (`Antrean_Produk`). Jika antrean kosong dan `SHOPEE_APP_ID` + `SHOPEE_SECRET` terisi, otomatis mencari produk **Rating >= 4.7** & **Komisi XTRA** lewat Shopee Affiliate Open API.
-2. **Agent 2 (`src/copywriter_agent.py`) — Copywriter & QC:** Menggunakan **Gemini 4 Hydrogen** (`google-genai`) dengan rantai fallback bertahap (`gemini-4-hydrogen` → `gemini-3.8-flash` → `gemini-3.6-flash` → `gemini-3.5-flash` → `gemini-3.5-flash-lite` → `gemini-2.5-pro` → `gemini-2.5-flash-lite` → dynamic discovery) untuk membuat 2 gaya tulisan (gaya ngobrol Threads dan gaya kurasi X), lalu disaring oleh modul QC agar **tidak ada link bocor** di utas utama Threads.
-3. **Agent 3 (`src/publishers.py`) — Publisher & Dispatcher:**
-   - Auto-post ke **Meta Threads** (utas utama + foto jika ada, lalu *auto-reply* link Shopee di bawahnya).
-   - Mengirim draf **X** siap *copy-paste* ke **Telegram** Anda.
-4. **Agent 4 & 5 (`src/engagement_manager.py`) — Admin Komentar & Office Manager:** Mengecek komentar baru di Threads setiap jam **21.00 WIB**, membuat saran balasan ramah dengan Gemini, mencatat ke tab `Komentar_Threads`, mengecek umur token Threads, dan mengingatkan jika stok produk `PENDING` menipis.
+## Arsitektur Inti (Agent 1–4)
 
-## Struktur Google Sheets (`Kantor Affiliate - Antrean & Laporan`)
-- **`Dashboard_&_Panduan`**: Ringkasan real-time + legenda warna.
-- **`Antrean_Produk`**:
-  - **Kuning (`#FFF2CC`)**: Input Wajib User (`Status`, `Kategori`, `Nama_Produk`, `Masalah_dan_Keunggulan`, `Link_Affiliate`).
-  - **Biru Muda (`#D9E8FB`)**: Input Opsional User (`Harga_Kisaran`, `URL_Foto_Publik`, `Catatan_User_untuk_AI`).
-  - **Abu-abu (`#F3F3F3`)**: Diisi otomatis oleh Agent (`ID`, `Sumber`, `Waktu_Tayang_WIB`, `Threads_Post_ID`, `Link_Post_Threads`, `Model_AI_Dipakai`, `Catatan_Agent`).
-- **`Log_Performa`**: Riwayat seluruh naskah, status publikasi, dan model AI yang dipakai.
-- **`Komentar_Threads`**: Daftar komentar masuk + saran balasan AI + opsi edit manual.
-- **`Pengaturan_Agent`**: Persona AI, model utama, rantai fallback Gemini, kata kunci Auto Hunter, dan batas stok minimum.
+1. **Agent 1 — Hunter & Rasio Konten ([`src/shopee_hunter.py`](src/shopee_hunter.py))**
+   - Membaca antrean `Antrean_Produk` dan riwayat `Log_Performa`.
+   - Menegakkan **rasio pengaman 60–70% Organik : 30–40% Soft Affiliate**:
+     - Maksimal **1 post `SOFT_AFFILIATE` per hari (WIB)**.
+     - Minimal **2 post `ORGANIK_*` berturut-turut** sebelum slot `SOFT_AFFILIATE` berikutnya dibuka.
+   - Jika giliran organik tiba dan antrean `ORGANIK_*` kosong, agent otomatis membuat topik organik sesuai niche (`Gadget Meja Kerja & Perlengkapan Kos/Rumah Tangga`).
+   - Memvalidasi foto produk (`URL_Foto_Publik` HTTPS wajib HTTP 200) untuk `SOFT_AFFILIATE`. Jika kosong atau gagal diakses, baris ditandai `NEED_PHOTO` dan mengirim alert Telegram.
+
+2. **Agent 2 — Copywriter & Strict Anti-Bot QC ([`src/copywriter_agent.py`](src/copywriter_agent.py))**
+   - **Context-Aware Anti-Repetition**: membaca hingga **10 naskah terakhir** di `Log_Performa` dan melarang pengulangan kalimat pembuka (*hook*) yang serupa.
+   - **Rotasi Angle Dinamis**: *Honest Micro-Review* (wajib menyebut 1 kekurangan minor/trade-off realistis), *Problem-Specific Story*, *Comparison*, dan *Casual Thought / Question*.
+   - **QC Validator Ketat (maks 3x regenerasi otomatis)**: menolak frasa klise AI/affiliate (`"sering kesel gak sih"`, `"pernah gak sih"`, `"jujur seneng banget"`, `"tanpa bikin kantong jebol"`, `"bikin mundur teratur"`, `"spill link"`, `"auto rapi"`, `"wajib punya"`, `"solusi terbaik"`, `"langsung check out"`, dll.), penomoran `1/2` / `2/2`, hashtag, bullet list kaku, lebih dari 1 emoji, URL bocor di utas utama, dan kapitalisasi tidak konsisten.
+
+3. **Agent 3 — Visual Gatekeeper, Publisher & Telegram ([`src/publishers.py`](src/publishers.py))**
+   - Konten `ORGANIK_*` diterbitkan sebagai **1 utas tunggal tanpa balasan link** dan tanpa penomoran `1/2` atau `2/2`.
+   - Konten `SOFT_AFFILIATE` wajib lolos verifikasi foto HTTPS `HTTP 200`, tidak selalu menyebut ajakan link di utas utama, dan menunggu **jeda acak 90–300 detik** sebelum mengirim balasan link dengan kalimat natural yang bervariasi.
+
+4. **Agent 4 — Engagement Manager ([`src/engagement_manager.py`](src/engagement_manager.py))**
+   - Mengambil komentar baru pada postingan `PUBLISHED` dan membuat saran balasan santai 1–2 kalimat ke tab `Komentar_Threads` & Telegram.
+   - Dilarang menyisipkan link atau jualan jika komentar audiens hanya menanggapi topik atau bercanda.
+
+*(Juga dilengkapi workflow pendukung riset tren & Super Audit mingguan di [`src/trend_researcher.py`](src/trend_researcher.py) dan [`src/ceo_auditor.py`](src/ceo_auditor.py)).*
+
+---
+
+## Konfigurasi Kolom Google Sheets
+
+### Tab `Antrean_Produk`
+- `ID`, `Status` (`PENDING`, `NEED_PHOTO`, `PUBLISHED`, `DRAFT_ONLY`, `ERROR`, `CONTOH`, `SKIP`)
+- `Kategori`, `Nama_Produk`, `Harga_Kisaran`, `Masalah_dan_Keunggulan`, `Link_Affiliate`, `URL_Foto_Publik`
+- `Catatan_User_untuk_AI`, `Sumber`, `Waktu_Tayang_WIB`, `Threads_Post_ID`, `Link_Post_Threads`, `Model_AI_Dipakai`, `Catatan_Agent`
+- **`Tipe_Konten`**:
+  - `ORGANIK_OPINI`: opini kasual/cerita relatable (tanpa link & tanpa foto wajib)
+  - `ORGANIK_TIPS`: tips singkat praktis dalam paragraf percakapan (tanpa link)
+  - `ORGANIK_DISKUSI`: pertanyaan ringan pemancing komentar (tanpa link)
+  - `SOFT_AFFILIATE`: ulasan produk dengan link affiliate (**wajib `URL_Foto_Publik` HTTP 200**)
+
+### Tab `Log_Performa`
+Mencatat riwayat tayang beserta kolom **`Tipe_Konten`**, `Draft_Threads`, `Status_Threads`, `Model_AI_Dipakai`, dan `Catatan_QC` untuk kontrol rasio dan anti-repetisi 10 postingan terakhir.
+
+---
+
+## Jadwal GitHub Actions (Humanized)
+- [`publish_content.yml`](.github/workflows/publish_content.yml): 3x sehari pada jam aktif WIB (`12:00`, `17:00`, `20:00` WIB) dengan **random jitter delay 3–25 menit** sebelum publikasi pada eksekusi terjadwal.
+- [`engagement_manager.yml`](.github/workflows/engagement_manager.yml): harian pukul `21:00` WIB.
+
+## Model AI & Fallback ([`src/config.py`](src/config.py))
+- Primary & Fallback Gemini aktif: `gemini-4-hydrogen` -> `gemini-3.8-flash` -> `gemini-3.7-flash` -> `gemini-3.6-flash` -> `gemini-3.5-flash` -> `gemini-3.5-flash-lite`
+- Cadangan OpenRouter aktif: `google/gemma-4-31b-it:free`, `google/gemma-4-26b-a4b-it:free`, `nvidia/nemotron-3-ultra-550b-a55b:free`, `google/gemini-3.8-flash`, `google/gemini-3.5-flash-lite`, `openrouter/free`
 
 ## Pengujian Lokal
 ```bash
-pip install -r requirements-dev.txt
-pytest -v
+.venv/bin/pytest -v
 ```

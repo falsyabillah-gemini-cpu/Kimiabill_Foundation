@@ -12,6 +12,7 @@ from src.ceo_auditor import run_super_audit
 from src.config import (
     DEFAULT_GEMINI_PRIMARY_MODEL,
     Settings,
+    normalize_content_type,
     now_wib_str,
     parse_model_chain,
     sheet_url,
@@ -21,6 +22,7 @@ from src.csv_importer import import_csv_to_sheets
 from src.engagement_manager import run_engagement_manager
 from src.gemini_client import GEMINI_NEW_KEY_TUTORIAL, GeminiClient, GeminiClientError
 from src.publishers import (
+    format_need_photo_telegram_message,
     format_publish_telegram_message,
     publish_to_threads,
     send_telegram_message,
@@ -69,42 +71,50 @@ def run_publish_pipeline(
 
     product = pick_next_product(sheets_client, settings, sheet_config)
     if product is None:
-        send_telegram_message(
-            bot_token=settings.telegram_bot_token,
-            chat_id=settings.telegram_chat_id,
-            html_text=(
-                "📦 <b>Kantor Agent Affiliate:</b> Tidak ada produk berstatus <code>PENDING</code> "
-                "di tab <i>Antrean_Produk</i> saat jadwal berjalan.\n"
-                "Tambahkan produk baru (atau isi <code>SHOPEE_APP_ID</code> &amp; <code>SHOPEE_SECRET</code>).\n\n"
-                f"📊 <a href=\"{html.escape(gs_link)}\">Buka Google Sheets (Antrean &amp; Laporan)</a>"
-            ),
-        )
+        if sheets_client.count_pending_products() == 0:
+            send_telegram_message(
+                bot_token=settings.telegram_bot_token,
+                chat_id=settings.telegram_chat_id,
+                html_text=(
+                    "📦 <b>Kantor Agent Affiliate:</b> Tidak ada produk berstatus <code>PENDING</code> "
+                    "yang siap tayang di tab <i>Antrean_Produk</i>.\n"
+                    "Silakan tambahkan produk/foto baru di sheet.\n\n"
+                    f"📊 <a href=\"{html.escape(gs_link)}\">Buka Google Sheets (Antrean &amp; Laporan)</a>"
+                ),
+            )
         return 0
 
     audit_report = sheets_client.get_latest_active_audit()
+    recent_posts = sheets_client.list_recent_log_context(limit=10)
+    tipe_konten = normalize_content_type(product.tipe_konten)
+
     try:
         copy_res = generate_copywriting(
-            gemini_client, product, sheet_config, audit_report=audit_report
+            gemini_client,
+            product,
+            sheet_config,
+            audit_report=audit_report,
+            recent_posts=recent_posts,
         )
     except Exception as exc:
         err_msg = f"[{now_wib_str()}] Gagal Copywriter/AI: {exc}"
-        # Jika gagal karena kuota/API AI, kembalikan ke PENDING agar produk tetap siap tayang berikutnya
         reset_status = "PENDING" if isinstance(exc, GeminiClientError) else "ERROR"
-        if not settings.dry_run:
-            sheets_client.update_queue_row_fields(
-                product.row_number,
-                {"Status": reset_status, "Catatan_Agent": err_msg},
-            )
-        else:
-            sheets_client.update_queue_row_fields(
-                product.row_number,
-                {"Catatan_Agent": err_msg},
-            )
+        if product.row_number > 0:
+            if not settings.dry_run:
+                sheets_client.update_queue_row_fields(
+                    product.row_number,
+                    {"Status": reset_status, "Catatan_Agent": err_msg},
+                )
+            else:
+                sheets_client.update_queue_row_fields(
+                    product.row_number,
+                    {"Catatan_Agent": err_msg},
+                )
         send_telegram_message(
             bot_token=settings.telegram_bot_token,
             chat_id=settings.telegram_chat_id,
             html_text=(
-                f"❌ <b>Error Copywriter</b> pada produk <b>{html.escape(product.nama_produk)}</b>:\n"
+                f"❌ <b>Error Copywriter</b> pada <b>{html.escape(product.nama_produk)}</b>:\n"
                 f"<code>{html.escape(str(exc)[:450])}</code>\n\n"
                 f"<pre>{html.escape(GEMINI_NEW_KEY_TUTORIAL)}</pre>\n\n"
                 f"📊 <a href=\"{html.escape(gs_link)}\">Buka Google Sheets</a>"
@@ -118,14 +128,33 @@ def run_publish_pipeline(
         main_post=copy_res.draft.threads_main_post,
         reply_text=copy_res.draft.threads_reply_text,
         image_url=product.url_foto_publik,
+        tipe_konten=tipe_konten,
         dry_run=settings.dry_run,
     )
 
-    pending_remaining = sheets_client.count_pending_products()
-    if settings.dry_run and product.status == "PENDING":
-        # Pada dry_run status tetap PENDING; hitung sisa setelah produk ini seolah tayang = pending - 1
-        pass
+    if threads_res.status == "NEED_PHOTO":
+        now_str = now_wib_str()
+        sheets_client.update_queue_row_fields(
+            product.row_number,
+            {
+                "Status": "NEED_PHOTO",
+                "Catatan_Agent": f"[{now_str}] Gatekeeping foto ditolak: {threads_res.error_message}",
+            },
+        )
+        send_telegram_message(
+            bot_token=settings.telegram_bot_token,
+            chat_id=settings.telegram_chat_id,
+            html_text=format_need_photo_telegram_message(
+                product_name=product.nama_produk,
+                kategori=product.kategori,
+                row_number=product.row_number,
+                reason=threads_res.error_message,
+                sheet_link=gs_link,
+            ),
+        )
+        return 0
 
+    pending_remaining = sheets_client.count_pending_products()
     model_label = copy_res.meta.display_label()
     tg_msg = format_publish_telegram_message(
         product_name=product.nama_produk,
@@ -139,6 +168,7 @@ def run_publish_pipeline(
         pending_remaining=pending_remaining,
         min_stock=min_stock,
         dry_run=settings.dry_run,
+        tipe_konten=tipe_konten,
         sheet_link=gs_link,
         quota_warning=copy_res.meta.quota_warning_message(),
     )
@@ -171,7 +201,7 @@ def run_publish_pipeline(
                 "Threads_Post_ID": threads_res.post_id,
                 "Link_Post_Threads": threads_res.permalink,
                 "Model_AI_Dipakai": model_label,
-                "Catatan_Agent": f"[{now_str}] Sukses tayang Threads + auto-reply & Telegram ({tg_status})",
+                "Catatan_Agent": f"[{now_str}] Sukses tayang Threads ({tipe_konten}) & Telegram ({tg_status})",
             },
         )
     elif threads_res.status == "SKIPPED_NO_TOKEN":
@@ -216,9 +246,13 @@ def run_publish_pipeline(
             "Status_Telegram": tg_status,
             "Model_AI_Dipakai": model_label,
             "Catatan_QC": qc_log,
+            "Tipe_Konten": tipe_konten,
         }
     )
-    print(f"[main] Selesai memproses '{product.nama_produk}' (Threads={threads_res.status}, TG={tg_status}, Model={model_label})")
+    print(
+        f"[main] Selesai memproses '{product.nama_produk}' "
+        f"(Tipe={tipe_konten}, Threads={threads_res.status}, TG={tg_status}, Model={model_label})"
+    )
     return 0 if threads_res.status != "ERROR" else 1
 
 

@@ -30,6 +30,13 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Humanize schedule with random jitter (3-25 minutes)
+        if: github.event_name == 'schedule'
+        run: |
+          JITTER=$((180 + RANDOM % 1321))
+          echo "Menunggu jitter acak ${JITTER} detik agar jadwal tidak robotik..."
+          sleep "${JITTER}"
+
       - name: Run Affiliate Publisher Pipeline
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

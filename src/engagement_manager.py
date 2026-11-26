@@ -147,20 +147,41 @@ def run_engagement_manager(
                 if "shopee.co.id" in text.lower() or "s.shopee" in text.lower():
                     continue
 
+                asks_purchase_info = any(
+                    kw in text.lower()
+                    for kw in (
+                        "link",
+                        "harga",
+                        "beli",
+                        "toko",
+                        "merk",
+                        "merek",
+                        "berapa",
+                        "spill",
+                        "dimana",
+                        "di mana",
+                        "nama barang",
+                        "checkout",
+                        "cekout",
+                    )
+                )
                 try:
                     suggestion_obj, meta = gemini.generate_structured(
                         system_prompt=(
-                            "Kamu Admin Komentar Meta Threads yang ramah dan membantu.\n"
+                            "Kamu pengguna Threads biasa yang membalas komentar teman dengan hangat.\n"
                             f"Gaya bahasa: {gaya}\nSapaan: {persona}\n"
-                            "Tugas: Balas komentar audiens secara singkat, natural, tidak kaku, "
-                            "dan arahkan cek komentar link produk jika mereka menanyakan link/harga."
+                            "ATURAN WAJIB:\n"
+                            "1. Balas HANYA 1-2 kalimat singkat, santai seperti teman ngobrol, tanpa bahasa iklan.\n"
+                            "2. DILARANG menyisipkan link/URL atau mengarahkan ke link produk jika komentar audiens hanya bercanda, setuju, atau menanggapi topik secara umum.\n"
+                            "3. Hanya jika mereka secara eksplisit bertanya link/harga/toko, bantu jawab singkat dan arahkan ke balasan thread terkait."
                         ),
                         user_prompt=(
-                            f"Produk yang dibahas: {product_name}\n"
-                            f"Komentar dari @{username}: {text}"
+                            f"Topik/Produk yang dibahas: {product_name}\n"
+                            f"Komentar dari @{username}: {text}\n"
+                            f"Butuh info link/harga?: {'YA' if asks_purchase_info else 'TIDAK (cukup tanggapi topik/candaan secara santai TANPA link)'}"
                         ),
                         response_model=CommentReplySuggestion,
-                        temperature=0.7,
+                        temperature=0.65,
                     )
                 except Exception as exc:
                     alerts.append(
@@ -176,6 +197,10 @@ def run_engagement_manager(
                         alerts.append(warn_html)
 
                 reply_text = suggestion_obj.reply_text.strip()
+                if not asks_purchase_info:
+                    from src.copywriter_agent import strip_leaked_links
+
+                    reply_text, _ = strip_leaked_links(reply_text)
                 status_balasan = "MENUNGGU_BALASAN"
 
                 if auto_reply_on and not settings.dry_run:
