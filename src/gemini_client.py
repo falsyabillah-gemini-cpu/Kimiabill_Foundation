@@ -82,7 +82,7 @@ def extract_json_object(text: str) -> dict[str, Any]:
     if start == -1:
         raise ValueError(f"Tidak ditemukan JSON object pada respons Gemini: {cleaned[:240]}")
 
-    decoder = json.JSONDecoder()
+    decoder = json.JSONDecoder(strict=False)
     for candidate in (cleaned[start:], re.sub(r",\s*([}\]])", r"\1", cleaned[start:])):
         try:
             obj, _ = decoder.raw_decode(candidate, 0)
@@ -95,7 +95,7 @@ def extract_json_object(text: str) -> dict[str, Any]:
     if end <= start:
         raise ValueError(f"JSON object tidak lengkap pada respons Gemini: {cleaned[:240]}")
     tail_cleaned = re.sub(r",\s*([}\]])", r"\1", cleaned[start : end + 1])
-    parsed = json.loads(tail_cleaned)
+    parsed = json.loads(tail_cleaned, strict=False)
     if not isinstance(parsed, dict):
         raise ValueError("Respons JSON Gemini bukan object dict.")
     return parsed
