@@ -157,7 +157,17 @@ class GeminiClient:
         self._client = (
             client
             if client is not None
-            else (genai.Client(api_key=api_key) if api_key else None)
+            else (
+                genai.Client(
+                    api_key=api_key,
+                    http_options=types.HttpOptions(
+                        timeout=25_000,
+                        retry_options=types.HttpRetryOptions(attempts=1),
+                    ),
+                )
+                if api_key
+                else None
+            )
         )
         self.primary_model = (primary_model or DEFAULT_GEMINI_PRIMARY_MODEL).strip()
         self.fallback_chain = parse_model_chain(",".join(fallback_chain), primary=self.primary_model)
@@ -276,7 +286,7 @@ class GeminiClient:
         user_prompt: str,
         response_model: Type[T],
         temperature: float = 0.7,
-        max_transient_retries: int = 2,
+        max_transient_retries: int = 1,
         use_google_search: bool = False,
     ) -> tuple[T, GeminiCallMeta]:
         """Panggil Gemini dengan output JSON terstruktur & fallback otomatis ke model gratis / OpenRouter."""
@@ -388,6 +398,8 @@ class GeminiClient:
                                 self._sleep(wait_s)
                                 continue
 
+                            if not search_enabled and status_code in (500, 502, 503, 504):
+                                self._exhausted_models.add(model_name)
                             msg = f"{model_name} gagal ({reason})"
                             notes.append(msg)
                             print(f"[gemini] {msg}. Beralih ke model berikutnya...")
