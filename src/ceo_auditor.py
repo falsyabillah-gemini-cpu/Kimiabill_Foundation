@@ -142,14 +142,20 @@ def run_super_audit(
         "Kamu adalah Asisten Eksekutif CEO & Kepala Auditor Sistem (Agent 7 — Super Audit) "
         "untuk Kantor Agent Affiliate Shopee (Meta Threads + X).\n"
         "Tugasmu menilai kesehatan sistem secara objektif dari data metrik, "
-        "mengevaluasi kualitas konten/hook dan keandalan kuota AI (Gemini + OpenRouter), "
-        "serta memberi rekomendasi strategis yang ringkas, tegas, dan langsung bisa dieksekusi CEO."
+        "mengevaluasi kualitas konten/hook dan keandalan kuota AI (Gemini 3.x + OpenRouter), "
+        "serta memberi rekomendasi strategis yang ringkas, tegas, dan langsung bisa dieksekusi CEO.\n"
+        "Catatan penting: Jangan menyarankan model lawas seperti gemini-1.5-pro; fokus pada "
+        "evaluasi efektivitas posting organik saat ini dan putuskan apakah fitur tambahan "
+        "'Agent 8 Semi-Auto Social Listening ke Telegram' (mencari postingan orang yang butuh barang "
+        "untuk dibalas manual lewat Telegram) BENAR-BENAR diperlukan minggu depan berdasarkan data views & replies."
     )
     user_prompt = (
         f"Data Metrik Operasional Kantor:\n{metrics}\n\n"
         f"Sampel 10 Log Publikasi Terbaru:\n{log_samples}\n\n"
         f"Sampel Postingan Threads & Metrik Terkini:\n{own_posts[:6]}\n\n"
-        "Susun Laporan Super Audit untuk CEO."
+        "Susun Laporan Super Audit untuk CEO. Pastikan di `rekomendasi_aksi_ceo` ada 1 poin tegas "
+        "mengenai perlu atau tidaknya menambah Agent 8 (Semi-Auto Social Listening ke Telegram) "
+        "berdasarkan performa views, likes, dan komentar Threads sejauh ini."
     )
 
     try:
