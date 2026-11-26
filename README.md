@@ -10,7 +10,7 @@ Sistem automasi konten Meta Threads, kurasi X, dan laporan operasional via Teleg
      - Maksimal **1 post `SOFT_AFFILIATE` per hari (WIB)**.
      - Minimal **2 post `ORGANIK_*` berturut-turut** sebelum slot `SOFT_AFFILIATE` berikutnya dibuka.
    - Jika giliran organik tiba dan antrean `ORGANIK_*` kosong, agent otomatis membuat topik organik sesuai niche (`Gadget Meja Kerja & Perlengkapan Kos/Rumah Tangga`).
-   - Memvalidasi foto produk (`URL_Foto_Publik` HTTPS wajib HTTP 200) untuk `SOFT_AFFILIATE`. Jika kosong atau gagal diakses, baris ditandai `NEED_PHOTO` dan mengirim alert Telegram.
+   - Memvalidasi foto produk (`URL_Foto_Publik` HTTPS wajib HTTP 200) untuk `SOFT_AFFILIATE`. Jika kosong atau gagal diakses, [`photo_finder.py`](src/photo_finder.py) otomatis mencari URL foto `HTTP 200 image/*` (via `SERPER_API_KEY`, `GOOGLE_CSE_API_KEY`+`GOOGLE_CSE_CX`, atau Gemini Grounding) dan menyimpannya ke Google Sheets; jika tetap gagal, baris ditandai `NEED_PHOTO` + alert Telegram.
 
 2. **Agent 2 — Copywriter & Strict Anti-Bot QC ([`src/copywriter_agent.py`](src/copywriter_agent.py))**
    - **Context-Aware Anti-Repetition**: membaca hingga **10 naskah terakhir** di `Log_Performa` dan melarang pengulangan kalimat pembuka (*hook*) yang serupa.

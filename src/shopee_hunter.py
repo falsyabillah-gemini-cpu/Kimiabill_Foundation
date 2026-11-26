@@ -314,11 +314,16 @@ def pick_next_product(
     settings: Settings,
     sheet_config: dict[str, str],
     *,
+    gemini: Any = None,
     http_post: Any = requests.post,
     http_get: Any = requests.get,
     today_date: str | None = None,
 ) -> ProductRow | None:
-    """Pilih item tayang berikutnya sesuai rasio Organik vs Soft Affiliate + validasi foto."""
+    """Pilih item tayang berikutnya sesuai rasio Organik vs Soft Affiliate + auto/validasi foto."""
+    from dataclasses import replace
+
+    from src.photo_finder import find_public_product_photo
+
     all_rows = sheets.list_queue_rows()
     logs = sheets.list_performance_logs(limit=40)
     needs_affiliate, ratio_reason = determine_content_slot(logs, today_date=today_date)
@@ -388,6 +393,28 @@ def pick_next_product(
         photo_ok, photo_reason = verify_public_image_url(
             row.url_foto_publik, http_get=http_get
         )
+        if not photo_ok:
+            auto_url, auto_source = find_public_product_photo(
+                row,
+                settings,
+                gemini=gemini,
+                http_post=http_post,
+                http_get=http_get,
+            )
+            if auto_url:
+                sheets.update_queue_row_fields(
+                    row.row_number,
+                    {
+                        "URL_Foto_Publik": auto_url,
+                        "Catatan_Agent": f"[{now_wib_str()}] Auto-Photo ditemukan via {auto_source}",
+                    },
+                )
+                row = replace(row, url_foto_publik=auto_url)
+                photo_ok = True
+                print(
+                    f"[hunter] Auto-Photo ({auto_source}) mengisi baris {row.row_number}: {auto_url}"
+                )
+
         if not photo_ok:
             sheets.update_queue_row_fields(
                 row.row_number,

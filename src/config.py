@@ -103,6 +103,9 @@ class Settings:
     shopee_secret: str
     dry_run: bool
     openrouter_api_key: str = ""
+    serper_api_key: str = ""
+    google_cse_api_key: str = ""
+    google_cse_cx: str = ""
 
     @classmethod
     def from_env(cls, *, dry_run_override: bool | None = None) -> "Settings":
@@ -129,4 +132,7 @@ class Settings:
             shopee_secret=os.environ.get("SHOPEE_SECRET", "").strip(),
             dry_run=dry_run,
             openrouter_api_key=os.environ.get("OPENROUTER_API_KEY", "").strip(),
+            serper_api_key=os.environ.get("SERPER_API_KEY", "").strip(),
+            google_cse_api_key=os.environ.get("GOOGLE_CSE_API_KEY", "").strip(),
+            google_cse_cx=os.environ.get("GOOGLE_CSE_CX", "").strip(),
         )

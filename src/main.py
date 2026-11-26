@@ -69,7 +69,9 @@ def run_publish_pipeline(
     except ValueError:
         min_stock = 5
 
-    product = pick_next_product(sheets_client, settings, sheet_config)
+    product = pick_next_product(
+        sheets_client, settings, sheet_config, gemini=gemini_client
+    )
     if product is None:
         if sheets_client.count_pending_products() == 0:
             send_telegram_message(

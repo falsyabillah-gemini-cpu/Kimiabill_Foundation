@@ -1091,6 +1091,106 @@ def test_engagement_manager_no_link_on_casual_comment() -> None:
     assert "Haha bener banget kak!" in comments[0]["Saran_Balasan_AI"]
 
 
+def test_auto_photo_finder_serper_and_google_cse() -> None:
+    from src.photo_finder import search_via_google_cse
+
+    sheets = _make_fake_sheets(
+        [
+            [
+                "8",
+                "PENDING",
+                "Gadget & Audio",
+                "Lampu Meja Jepit LED 3 Warna",
+                "Rp129.000",
+                "Cahaya merata hemat tempat",
+                "https://s.shopee.co.id/lampu8",
+                "",  # empty URL_Foto_Publik -> auto-filled by Serper
+                "Toko: Michizuru",
+                "CSV_BULK_IMPORT",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "SOFT_AFFILIATE",
+            ]
+        ]
+    )
+    for i in range(1, 3):
+        sheets.append_performance_log(
+            {
+                "Tanggal_WIB": f"2026-11-25 1{i}:00:00 WIB",
+                "ID_Produk": f"ORG-{i}",
+                "Nama_Produk": f"Opini {i}",
+                "Mode_Run": "LIVE",
+                "Status_Threads": "PUBLISHED",
+                "Draft_Threads": f"Organik #{i}.",
+                "Tipe_Konten": "ORGANIK_OPINI",
+            }
+        )
+
+    settings = Settings(
+        gemini_api_key="k",
+        gemini_primary_model="gemini-4-hydrogen",
+        google_sheet_id="sheet-123",
+        google_service_account_json="",
+        telegram_bot_token="",
+        telegram_chat_id="",
+        threads_user_id="u1",
+        threads_access_token="tok",
+        shopee_app_id="",
+        shopee_secret="",
+        dry_run=True,
+        serper_api_key="serper-secret",
+    )
+
+    def fake_serper_post(url: str, headers: dict[str, str], json: dict[str, Any], timeout: int) -> Any:
+        assert "google.serper.dev/images" in url
+        assert headers["X-API-KEY"] == "serper-secret"
+        return SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "images": [
+                    {"imageUrl": "https://down-id.img.susercontent.com/file/id-lampu-valid"}
+                ]
+            },
+        )
+
+    def fake_get(url: str, **kw: Any) -> Any:
+        if "customsearch/v1" in url:
+            return SimpleNamespace(
+                status_code=200,
+                json=lambda: {
+                    "items": [
+                        {"link": "https://down-id.img.susercontent.com/file/id-cse-valid"}
+                    ]
+                },
+            )
+        return SimpleNamespace(
+            status_code=200,
+            headers={"Content-Type": "image/jpeg"},
+            close=lambda: None,
+        )
+
+    chosen = pick_next_product(
+        sheets,
+        settings,
+        sheets.get_settings(),
+        today_date="2026-11-26",
+        http_post=fake_serper_post,
+        http_get=fake_get,
+    )
+    assert chosen is not None
+    assert chosen.url_foto_publik == "https://down-id.img.susercontent.com/file/id-lampu-valid"
+    rows = sheets.list_queue_rows()
+    assert rows[0].url_foto_publik == "https://down-id.img.susercontent.com/file/id-lampu-valid"
+    assert rows[0].status == "PENDING"
+
+    cse_url = search_via_google_cse("Lampu Meja", "cse-key", "cse-cx", http_get=fake_get)
+    assert cse_url == "https://down-id.img.susercontent.com/file/id-cse-valid"
+
+
+
 
 
 
