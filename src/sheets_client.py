@@ -17,6 +17,7 @@ TAB_KOMENTAR = "Komentar_Threads"
 TAB_PENGATURAN = "Pengaturan_Agent"
 TAB_REFERENSI = "Referensi_Viral_Threads"
 TAB_AUDIT = "Audit_Riset_Threads"
+TAB_CEO_AUDIT = "Laporan_Super_Audit_CEO"
 
 
 @dataclass
@@ -323,6 +324,48 @@ class SheetsClient:
                 if item.get("Pola_Hook_Terbaik") or item.get("Pola_Kalimat_Human"):
                     return item
         return None
+
+    def list_performance_logs(self, limit: int = 50) -> list[dict[str, str]]:
+        """Ambil daftar log eksekusi terbaru dari `Log_Performa`."""
+        try:
+            _, headers, data_rows = self._read_table(TAB_LOG)
+        except Exception:
+            return []
+        logs: list[dict[str, str]] = []
+        for raw in reversed(data_rows):
+            if not any(c.strip() for c in raw):
+                continue
+            logs.append(self._row_to_dict(headers, raw))
+            if len(logs) >= limit:
+                break
+        return logs
+
+    def list_comment_rows(self, limit: int = 50) -> list[dict[str, str]]:
+        """Ambil daftar komentar terbaru dari `Komentar_Threads`."""
+        try:
+            _, headers, data_rows = self._read_table(TAB_KOMENTAR)
+        except Exception:
+            return []
+        rows: list[dict[str, str]] = []
+        for raw in reversed(data_rows):
+            if not any(c.strip() for c in raw):
+                continue
+            rows.append(self._row_to_dict(headers, raw))
+            if len(rows) >= limit:
+                break
+        return rows
+
+    def append_ceo_audit_report(self, entry: dict[str, str]) -> None:
+        """Simpan laporan Super Audit (Asisten CEO) ke tab `Laporan_Super_Audit_CEO`."""
+        ws, headers, data_rows = self._read_table(TAB_CEO_AUDIT)
+        row_values = [entry.get(h, "") for h in headers]
+        target_row = self._first_empty_row(data_rows)
+        end_col = _col_letter(len(headers))
+        ws.update(
+            range_name=f"A{target_row}:{end_col}{target_row}",
+            values=[row_values],
+            value_input_option="USER_ENTERED",
+        )
 
     @staticmethod
     def _first_empty_row(data_rows: list[list[str]]) -> int:

@@ -8,6 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from src.ceo_auditor import run_super_audit
 from src.config import (
     DEFAULT_GEMINI_PRIMARY_MODEL,
     Settings,
@@ -18,7 +19,7 @@ from src.config import (
 from src.copywriter_agent import generate_copywriting
 from src.csv_importer import import_csv_to_sheets
 from src.engagement_manager import run_engagement_manager
-from src.gemini_client import GeminiClient
+from src.gemini_client import GEMINI_NEW_KEY_TUTORIAL, GeminiClient, GeminiClientError
 from src.publishers import (
     format_publish_telegram_message,
     publish_to_threads,
@@ -43,6 +44,7 @@ def _build_gemini_client(settings: Settings, sheet_config: dict[str, str]) -> Ge
         settings.gemini_api_key,
         primary_model=primary,
         fallback_chain=fallback_chain,
+        openrouter_api_key=settings.openrouter_api_key,
     )
 
 
@@ -85,11 +87,13 @@ def run_publish_pipeline(
             gemini_client, product, sheet_config, audit_report=audit_report
         )
     except Exception as exc:
-        err_msg = f"[{now_wib_str()}] Gagal Copywriter/Gemini: {exc}"
+        err_msg = f"[{now_wib_str()}] Gagal Copywriter/AI: {exc}"
+        # Jika gagal karena kuota/API AI, kembalikan ke PENDING agar produk tetap siap tayang berikutnya
+        reset_status = "PENDING" if isinstance(exc, GeminiClientError) else "ERROR"
         if not settings.dry_run:
             sheets_client.update_queue_row_fields(
                 product.row_number,
-                {"Status": "ERROR", "Catatan_Agent": err_msg},
+                {"Status": reset_status, "Catatan_Agent": err_msg},
             )
         else:
             sheets_client.update_queue_row_fields(
@@ -101,7 +105,8 @@ def run_publish_pipeline(
             chat_id=settings.telegram_chat_id,
             html_text=(
                 f"❌ <b>Error Copywriter</b> pada produk <b>{html.escape(product.nama_produk)}</b>:\n"
-                f"<code>{html.escape(str(exc))}</code>\n\n"
+                f"<code>{html.escape(str(exc)[:450])}</code>\n\n"
+                f"<pre>{html.escape(GEMINI_NEW_KEY_TUTORIAL)}</pre>\n\n"
                 f"📊 <a href=\"{html.escape(gs_link)}\">Buka Google Sheets</a>"
             ),
         )
@@ -237,10 +242,14 @@ def run_check_gemini(settings: Settings) -> int:
         status: str
         model_note: str
 
-    gemini = GeminiClient(settings.gemini_api_key, primary_model=settings.gemini_primary_model)
+    gemini = GeminiClient(
+        settings.gemini_api_key,
+        primary_model=settings.gemini_primary_model,
+        openrouter_api_key=settings.openrouter_api_key,
+    )
     res, meta = gemini.generate_structured(
         system_prompt="Balas JSON singkat status='ok'.",
-        user_prompt="Uji koneksi model Gemini.",
+        user_prompt="Uji koneksi model Gemini/OpenRouter.",
         response_model=Ping,
         temperature=0.0,
     )
@@ -272,11 +281,26 @@ def run_research_pipeline(settings: Settings) -> int:
     return 0
 
 
+def run_super_audit_pipeline(settings: Settings) -> int:
+    sheets_client = SheetsClient(
+        settings.google_sheet_id, settings.google_service_account_json
+    )
+    sheet_config = sheets_client.get_settings()
+    gemini_client = _build_gemini_client(settings, sheet_config)
+    summary = run_super_audit(
+        settings=settings,
+        sheets=sheets_client,
+        gemini=gemini_client,
+    )
+    print(f"[main] Super Audit CEO selesai: {summary}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Kantor Agent Affiliate Online (Dual Threads + X)")
     parser.add_argument(
         "command",
-        choices=["publish", "engagement", "research", "check-gemini", "import-csv"],
+        choices=["publish", "engagement", "research", "super-audit", "check-gemini", "import-csv"],
         help="Mode eksekusi agent",
     )
     parser.add_argument(
@@ -300,6 +324,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_engagement_pipeline(settings)
     if args.command == "research":
         return run_research_pipeline(settings)
+    if args.command == "super-audit":
+        return run_super_audit_pipeline(settings)
     if args.command == "import-csv":
         if not args.csv_file:
             parser.error("--file wajib diisi untuk command import-csv")

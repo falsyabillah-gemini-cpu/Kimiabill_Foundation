@@ -125,6 +125,11 @@ def _make_fake_sheets(pending_rows: list[list[str]] | None = None) -> SheetsClie
         "Pola_Kalimat_Human", "Pola_CTA_Link_Reply", "Pantangan_QC_Baru",
         "Ringkasan_Eksekutif", "Status_Feed_Copywriter", "Model_AI_Dipakai",
     ]
+    ceo_headers = [
+        "Tanggal_Audit_WIB", "Periode_Audit", "Skor_Kesehatan_Kantor", "Status_Kantor",
+        "Ringkasan_Eksekutif_CEO", "Evaluasi_Konten_&_Hook", "Evaluasi_Model_AI_&_Kuota",
+        "Rekomendasi_Aksi_CEO", "Rekomendasi_Prompt_Agent2", "Model_AI_Dipakai",
+    ]
     tabs = {
         "Antrean_Produk": [antrean_headers] + (pending_rows or []),
         "Log_Performa": [log_headers],
@@ -132,6 +137,7 @@ def _make_fake_sheets(pending_rows: list[list[str]] | None = None) -> SheetsClie
         "Pengaturan_Agent": pengaturan_rows,
         "Referensi_Viral_Threads": [referensi_headers],
         "Audit_Riset_Threads": [audit_headers],
+        "Laporan_Super_Audit_CEO": [ceo_headers],
     }
     return SheetsClient("sheet-123", "", spreadsheet=_FakeSpreadsheet(tabs))
 
@@ -597,7 +603,7 @@ def test_gemini_low_quota_warning_triggered_and_formatted() -> None:
     )
     warn = meta.quota_warning_message()
     assert warn is not None
-    assert "GEMINI_API_KEY baru" in warn
+    assert "GEMINI_API_KEY terpisah" in warn
 
     msg = format_publish_telegram_message(
         product_name="Kabel Klip",
@@ -615,6 +621,129 @@ def test_gemini_low_quota_warning_triggered_and_formatted() -> None:
     )
     assert "PERINGATAN KUOTA GEMINI" in msg
     assert "Kimiabill_Project" in msg
+    assert "aistudio.google.com/apikey" in msg
+
+
+def test_openrouter_fallback_and_tutorial() -> None:
+    fake = _FakeGenAIClient(
+        {"gemini-4-hydrogen": [RuntimeError("429 RESOURCE_EXHAUSTED")]}
+    )
+
+    def fake_or_post(url: str, headers: dict[str, str], json: dict[str, Any], timeout: int) -> Any:
+        assert "openrouter.ai" in url
+        return SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "choices": [{"message": {"content": '{"answer": "via-openrouter"}'}}]
+            },
+        )
+
+    client = GeminiClient(
+        "dummy-gemini",
+        primary_model="gemini-4-hydrogen",
+        fallback_chain=("gemini-4-hydrogen",),
+        openrouter_api_key="or-key",
+        openrouter_models=("google/gemini-2.5-flash",),
+        client=fake,
+        sleep_fn=lambda _: None,
+        http_post=fake_or_post,
+    )
+    client.fallback_chain = ("gemini-4-hydrogen",)
+    res, meta = client.generate_structured(
+        system_prompt="s", user_prompt="u", response_model=_SampleOut
+    )
+    assert res.answer == "via-openrouter"
+    assert meta.actual_model == "openrouter/google/gemini-2.5-flash"
+    warn = meta.quota_warning_message()
+    assert warn is not None
+    assert "Create API key in new project" in warn
+
+
+def test_agent7_super_audit_ceo() -> None:
+    from src.ceo_auditor import run_super_audit
+
+    sheets = _make_fake_sheets(
+        [
+            ["1", "PENDING", "Meja Kerja", "Kabel Klip", "Rp25.000", "Rapi", "https://s.shopee.co.id/1", "", "", "CSV_BULK_IMPORT", "", "", "", "", ""],
+        ]
+    )
+    sheets.append_performance_log(
+        {
+            "Tanggal_WIB": "2026-11-25 21:21:47 WIB",
+            "ID_Produk": "6",
+            "Nama_Produk": "Mipanda Watch Charger",
+            "Mode_Run": "LIVE",
+            "Status_Threads": "PUBLISHED",
+            "Threads_Post_ID": "p1",
+            "Threads_Reply_ID": "r1",
+            "Draft_Threads": "Contoh utas",
+            "Draft_Reply_Link": "https://s.shopee.co.id/2",
+            "Draft_X": "Contoh X",
+            "Status_Telegram": "SENT",
+            "Model_AI_Dipakai": "gemini-3.6-flash (fallback dari gemini-4-hydrogen)",
+            "Catatan_QC": "OK",
+        }
+    )
+
+    fake_ai = _FakeGenAIClient(
+        {
+            "gemini-4-hydrogen": [
+                {
+                    "skor_kesehatan_kantor": 88,
+                    "status_kantor": "SEHAT",
+                    "ringkasan_eksekutif_ceo": "Operasional minggu ini sehat dan 1 post sudah live.",
+                    "evaluasi_konten_dan_hook": "Hook curhat meja kerja cukup menarik.",
+                    "evaluasi_model_ai_dan_kuota": "Fallback berjalan lancar ke gemini-3.6-flash.",
+                    "rekomendasi_aksi_ceo": "1. Tambah produk Meja Kerja\n2. Pantau engagement besok.",
+                    "rekomendasi_prompt_agent2": "Pertahankan gaya curhat singkat.",
+                }
+            ]
+        }
+    )
+    gemini = GeminiClient("k", client=fake_ai, sleep_fn=lambda _: None)
+
+    def fake_get(url: str, **kw: Any) -> Any:
+        if url.endswith("/threads"):
+            return SimpleNamespace(status_code=200, json=lambda: {"data": [{"id": "p1", "text": "Post 1"}]})
+        if "/insights" in url:
+            return SimpleNamespace(
+                status_code=200,
+                json=lambda: {"data": [{"name": "views", "values": [{"value": 250}]}]},
+            )
+        return SimpleNamespace(status_code=200, json=lambda: {"data": []})
+
+    tg_payloads: list[dict[str, Any]] = []
+
+    def fake_post(url: str, json: dict[str, Any] | None = None, **kw: Any) -> Any:
+        tg_payloads.append(json or {})
+        return SimpleNamespace(status_code=200, json=lambda: {"ok": True})
+
+    settings = Settings(
+        gemini_api_key="k",
+        gemini_primary_model="gemini-4-hydrogen",
+        google_sheet_id="sheet-123",
+        google_service_account_json="",
+        telegram_bot_token="bot",
+        telegram_chat_id="123",
+        threads_user_id="u1",
+        threads_access_token="tok",
+        shopee_app_id="",
+        shopee_secret="",
+        dry_run=False,
+    )
+
+    res = run_super_audit(
+        settings=settings, sheets=sheets, gemini=gemini, http_get=fake_get, http_post=fake_post
+    )
+    assert res["score"] == 88
+    assert res["status"] == "SEHAT"
+    assert res["telegram_status"] == "SENT"
+    assert "LAPORAN SUPER AUDIT" in tg_payloads[0]["text"]
+    assert "Laporan_Super_Audit_CEO" in tg_payloads[0]["text"]
+    ceo_rows = sheets._spreadsheet.worksheet("Laporan_Super_Audit_CEO").get_all_values()
+    assert len(ceo_rows) == 2
+    assert ceo_rows[1][2] == "88"
+
 
 
 

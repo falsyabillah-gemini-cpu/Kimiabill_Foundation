@@ -21,6 +21,14 @@ DEFAULT_GEMINI_FALLBACK_CHAIN: tuple[str, ...] = (
     "gemini-2.5-flash-lite",
 )
 
+DEFAULT_OPENROUTER_FALLBACK_MODELS: tuple[str, ...] = (
+    "google/gemini-2.5-flash",
+    "google/gemini-2.5-flash-lite",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "qwen/qwen-2.5-72b-instruct:free",
+    "openrouter/free",
+)
+
 
 def now_wib() -> datetime:
     return datetime.now(tz=WIB_TZ)
@@ -73,6 +81,7 @@ class Settings:
     shopee_app_id: str
     shopee_secret: str
     dry_run: bool
+    openrouter_api_key: str = ""
 
     @classmethod
     def from_env(cls, *, dry_run_override: bool | None = None) -> "Settings":
@@ -98,4 +107,5 @@ class Settings:
             shopee_app_id=os.environ.get("SHOPEE_APP_ID", "").strip(),
             shopee_secret=os.environ.get("SHOPEE_SECRET", "").strip(),
             dry_run=dry_run,
+            openrouter_api_key=os.environ.get("OPENROUTER_API_KEY", "").strip(),
         )

@@ -12,17 +12,32 @@ import time
 from dataclasses import dataclass
 from typing import Any, Type, TypeVar
 
+import requests
 from google import genai
 from google.genai import types
 from pydantic import BaseModel
 
-from src.config import DEFAULT_GEMINI_FALLBACK_CHAIN, DEFAULT_GEMINI_PRIMARY_MODEL, parse_model_chain
+from src.config import (
+    DEFAULT_GEMINI_FALLBACK_CHAIN,
+    DEFAULT_GEMINI_PRIMARY_MODEL,
+    DEFAULT_OPENROUTER_FALLBACK_MODELS,
+    parse_model_chain,
+)
 
 T = TypeVar("T", bound=BaseModel)
 
+OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+GEMINI_NEW_KEY_TUTORIAL = (
+    "Tutorial buat GEMINI_API_KEY terpisah dari Kimiabill_Project:\n"
+    "1) Buka aistudio.google.com/apikey -> klik Create API key\n"
+    "2) Pilih 'Create API key in new project' (JANGAN pakai Default Gemini Project yang sama dengan Kimiabill_Project)\n"
+    "3) Salin key barunya -> GitHub repo Kimiabill_Foundation -> Settings -> Secrets -> Actions -> edit GEMINI_API_KEY."
+)
+
 
 class GeminiClientError(RuntimeError):
-    """Raised when all Gemini models in the fallback chain fail."""
+    """Raised when all Gemini models (and OpenRouter fallback) fail."""
 
 
 @dataclass(frozen=True)
@@ -42,13 +57,12 @@ class GeminiCallMeta:
     def quota_warning_message(self) -> str | None:
         low_tier = self.used_fallback and (
             "lite" in self.actual_model.lower()
-            or self.actual_model.lower().startswith("gemma-")
+            or self.actual_model.lower().startswith(("gemma-", "openrouter/"))
         )
         if self.rate_limited_count >= 2 or low_tier:
             return (
                 f"Kuota Gemini API mulai menipis ({self.rate_limited_count}x limit 429, "
-                f"aktif di {self.actual_model}). Disarankan buat GEMINI_API_KEY baru di "
-                "Google Cloud Project terpisah dari Kimiabill_Project sebagai cadangan."
+                f"aktif di {self.actual_model}).\n{GEMINI_NEW_KEY_TUTORIAL}"
             )
         return None
 
@@ -123,7 +137,7 @@ def _is_transient(status_code: int | None) -> bool:
 
 
 class GeminiClient:
-    """Wrapper `google-genai` dengan rantai degradasi model otomatis per run."""
+    """Wrapper `google-genai` dengan rantai degradasi model otomatis + cadangan OpenRouter."""
 
     def __init__(
         self,
@@ -131,19 +145,32 @@ class GeminiClient:
         *,
         primary_model: str = DEFAULT_GEMINI_PRIMARY_MODEL,
         fallback_chain: tuple[str, ...] = DEFAULT_GEMINI_FALLBACK_CHAIN,
+        openrouter_api_key: str = "",
+        openrouter_models: tuple[str, ...] = DEFAULT_OPENROUTER_FALLBACK_MODELS,
         client: Any | None = None,
         sleep_fn: Any = time.sleep,
+        http_post: Any = requests.post,
     ) -> None:
-        if not api_key and client is None:
-            raise GeminiClientError("GEMINI_API_KEY belum diisi.")
-        self._client = client if client is not None else genai.Client(api_key=api_key)
+        if not api_key and not openrouter_api_key and client is None:
+            raise GeminiClientError("GEMINI_API_KEY dan OPENROUTER_API_KEY belum diisi.")
+        self._has_gemini = bool(api_key or client is not None)
+        self._client = (
+            client
+            if client is not None
+            else (genai.Client(api_key=api_key) if api_key else None)
+        )
         self.primary_model = (primary_model or DEFAULT_GEMINI_PRIMARY_MODEL).strip()
         self.fallback_chain = parse_model_chain(",".join(fallback_chain), primary=self.primary_model)
+        self.openrouter_api_key = (openrouter_api_key or "").strip()
+        self.openrouter_models = tuple(openrouter_models)
         self._exhausted_models: set[str] = set()
         self._sleep = sleep_fn
+        self._http_post = http_post
 
     def _discover_available_free_flash(self, already_tried: set[str]) -> list[str]:
         """Cari model Gemini/Gemma lain lewat API models.list jika daftar statis gagal semua."""
+        if self._client is None:
+            return []
         try:
             discovered: list[str] = []
             for m in self._client.models.list():
@@ -166,6 +193,82 @@ class GeminiClient:
         except Exception:
             return []
 
+    def _call_openrouter_fallback(
+        self,
+        *,
+        system_prompt: str,
+        full_user_prompt: str,
+        response_model: Type[T],
+        temperature: float,
+        all_attempted: list[str],
+        notes: list[str],
+        rate_limited_count: int,
+    ) -> tuple[T, GeminiCallMeta] | None:
+        if not self.openrouter_api_key:
+            return None
+
+        headers = {
+            "Authorization": f"Bearer {self.openrouter_api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/falsyabillah-gemini-cpu/Kimiabill_Foundation",
+            "X-Title": "Kimiabill_Foundation_Affiliate_Agent",
+        }
+        for or_model in self.openrouter_models:
+            tag = f"openrouter/{or_model}"
+            if tag in self._exhausted_models:
+                continue
+            all_attempted.append(tag)
+            payload = {
+                "model": or_model,
+                "temperature": temperature,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": full_user_prompt},
+                ],
+            }
+            try:
+                resp = self._http_post(
+                    OPENROUTER_CHAT_URL,
+                    headers=headers,
+                    json=payload,
+                    timeout=45,
+                )
+                if resp.status_code in (401, 402, 403, 404, 429):
+                    self._exhausted_models.add(tag)
+                    msg = f"{tag} -> HTTP {resp.status_code}"
+                    notes.append(msg)
+                    print(f"[openrouter] {msg}. Beralih ke model berikutnya...")
+                    continue
+                if resp.status_code >= 400:
+                    msg = f"{tag} gagal (HTTP {resp.status_code})"
+                    notes.append(msg)
+                    print(f"[openrouter] {msg}. Beralih ke model berikutnya...")
+                    continue
+
+                body = resp.json()
+                raw_text = (
+                    body.get("choices", [{}])[0]
+                    .get("message", {})
+                    .get("content", "")
+                )
+                parsed_dict = extract_json_object(raw_text)
+                parsed_obj = response_model.model_validate(parsed_dict)
+                meta = GeminiCallMeta(
+                    requested_model=self.primary_model,
+                    actual_model=tag,
+                    used_fallback=True,
+                    attempted_models=tuple(dict.fromkeys(all_attempted)),
+                    fallback_notes=" | ".join(notes),
+                    rate_limited_count=rate_limited_count,
+                )
+                return parsed_obj, meta
+            except Exception as exc:
+                msg = f"{tag} gagal ({str(exc)[:140]})"
+                notes.append(msg)
+                print(f"[openrouter] {msg}. Beralih ke model berikutnya...")
+                continue
+        return None
+
     def generate_structured(
         self,
         *,
@@ -176,7 +279,7 @@ class GeminiClient:
         max_transient_retries: int = 2,
         use_google_search: bool = False,
     ) -> tuple[T, GeminiCallMeta]:
-        """Panggil Gemini dengan output JSON terstruktur & fallback otomatis ke model gratis tertinggi."""
+        """Panggil Gemini dengan output JSON terstruktur & fallback otomatis ke model gratis / OpenRouter."""
         schema = response_model.model_json_schema()
         full_user_prompt = (
             f"{user_prompt}\n\n"
@@ -191,103 +294,123 @@ class GeminiClient:
         notes: list[str] = []
         standard_429_models: set[str] = set()
 
-        for search_enabled in search_modes:
-            candidates = [m for m in self.fallback_chain if m not in self._exhausted_models]
-            if not candidates:
-                candidates = list(self.fallback_chain)
-            if not search_enabled and use_google_search:
-                # Reset cache hanya untuk mencoba ulang tanpa grounding tool
-                candidates = list(self.fallback_chain)
+        if self._client is not None:
+            for search_enabled in search_modes:
+                candidates = [m for m in self.fallback_chain if m not in self._exhausted_models]
+                if not candidates:
+                    candidates = list(self.fallback_chain)
+                if not search_enabled and use_google_search:
+                    candidates = list(self.fallback_chain)
 
-            discovered_added = False
-            idx = 0
-            while idx < len(candidates):
-                model_name = candidates[idx]
-                idx += 1
-                all_attempted.append(model_name)
+                discovered_added = False
+                idx = 0
+                while idx < len(candidates):
+                    model_name = candidates[idx]
+                    idx += 1
+                    all_attempted.append(model_name)
 
-                if idx == len(candidates) and not discovered_added:
-                    discovered_added = True
-                    extra = self._discover_available_free_flash(set(candidates) | set(all_attempted))
-                    for em in extra:
-                        if em not in candidates:
-                            candidates.append(em)
+                    if idx == len(candidates) and not discovered_added:
+                        discovered_added = True
+                        extra = self._discover_available_free_flash(set(candidates) | set(all_attempted))
+                        for em in extra:
+                            if em not in candidates:
+                                candidates.append(em)
 
-                allow_search_this_model = search_enabled
-                for attempt in range(max_transient_retries + 1):
-                    try:
-                        config_kwargs: dict[str, Any] = {
-                            "system_instruction": system_prompt,
-                            "temperature": temperature,
-                        }
-                        if allow_search_this_model:
-                            config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
-                        else:
-                            config_kwargs["response_mime_type"] = "application/json"
+                    allow_search_this_model = search_enabled
+                    for attempt in range(max_transient_retries + 1):
+                        try:
+                            config_kwargs: dict[str, Any] = {
+                                "system_instruction": system_prompt,
+                                "temperature": temperature,
+                            }
+                            if allow_search_this_model:
+                                config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
+                            else:
+                                config_kwargs["response_mime_type"] = "application/json"
 
-                        response = self._client.models.generate_content(
-                            model=model_name,
-                            contents=full_user_prompt,
-                            config=types.GenerateContentConfig(**config_kwargs),
-                        )
-                        raw_text = getattr(response, "text", None) or ""
-                        if not raw_text and getattr(response, "candidates", None):
-                            parts = response.candidates[0].content.parts
-                            raw_text = "".join(getattr(p, "text", "") or "" for p in parts)
-                        parsed_dict = extract_json_object(raw_text)
-                        parsed_obj = response_model.model_validate(parsed_dict)
+                            response = self._client.models.generate_content(
+                                model=model_name,
+                                contents=full_user_prompt,
+                                config=types.GenerateContentConfig(**config_kwargs),
+                            )
+                            raw_text = getattr(response, "text", None) or ""
+                            if not raw_text and getattr(response, "candidates", None):
+                                parts = response.candidates[0].content.parts
+                                raw_text = "".join(getattr(p, "text", "") or "" for p in parts)
+                            parsed_dict = extract_json_object(raw_text)
+                            parsed_obj = response_model.model_validate(parsed_dict)
 
-                        used_fallback = model_name != self.primary_model or (
-                            use_google_search and not allow_search_this_model
-                        )
-                        meta = GeminiCallMeta(
-                            requested_model=self.primary_model,
-                            actual_model=model_name,
-                            used_fallback=used_fallback,
-                            attempted_models=tuple(dict.fromkeys(all_attempted)),
-                            fallback_notes=" | ".join(notes),
-                            rate_limited_count=len(standard_429_models),
-                        )
-                        return parsed_obj, meta
+                            used_fallback = model_name != self.primary_model or (
+                                use_google_search and not allow_search_this_model
+                            )
+                            meta = GeminiCallMeta(
+                                requested_model=self.primary_model,
+                                actual_model=model_name,
+                                used_fallback=used_fallback,
+                                attempted_models=tuple(dict.fromkeys(all_attempted)),
+                                fallback_notes=" | ".join(notes),
+                                rate_limited_count=len(standard_429_models),
+                            )
+                            return parsed_obj, meta
 
-                    except Exception as exc:
-                        status_code, reason = _classify_error(exc)
+                        except Exception as exc:
+                            status_code, reason = _classify_error(exc)
 
-                        if status_code == 401:
-                            raise GeminiClientError(
-                                "GEMINI_API_KEY tidak valid atau ditolak (HTTP 401)."
-                            ) from exc
+                            if status_code == 401:
+                                if self.openrouter_api_key:
+                                    notes.append("GEMINI_API_KEY HTTP 401 -> pindah ke OpenRouter")
+                                    break
+                                raise GeminiClientError(
+                                    "GEMINI_API_KEY tidak valid atau ditolak (HTTP 401)."
+                                ) from exc
 
-                        if allow_search_this_model and status_code in (400, 403):
-                            allow_search_this_model = False
-                            notes.append(f"{model_name} tanpa GoogleSearch ({reason})")
-                            continue
+                            if allow_search_this_model and status_code in (400, 403):
+                                allow_search_this_model = False
+                                notes.append(f"{model_name} tanpa GoogleSearch ({reason})")
+                                continue
 
-                        if _should_downgrade_immediately(status_code, reason):
-                            if not search_enabled:
-                                self._exhausted_models.add(model_name)
-                                if status_code == 429:
-                                    standard_429_models.add(model_name)
-                            msg = f"{model_name}{' [search]' if allow_search_this_model else ''} -> {reason}"
+                            if _should_downgrade_immediately(status_code, reason):
+                                if not search_enabled:
+                                    self._exhausted_models.add(model_name)
+                                    if status_code == 429:
+                                        standard_429_models.add(model_name)
+                                msg = f"{model_name}{' [search]' if allow_search_this_model else ''} -> {reason}"
+                                notes.append(msg)
+                                print(f"[gemini] {msg}. Menurunkan ke model berikutnya...")
+                                break
+
+                            if _is_transient(status_code) and attempt < max_transient_retries:
+                                wait_s = min(6, 2 * (attempt + 1))
+                                print(
+                                    f"[gemini] {model_name} gangguan sementara ({reason}), "
+                                    f"coba ulang dalam {wait_s}s..."
+                                )
+                                self._sleep(wait_s)
+                                continue
+
+                            msg = f"{model_name} gagal ({reason})"
                             notes.append(msg)
-                            print(f"[gemini] {msg}. Menurunkan ke model berikutnya...")
+                            print(f"[gemini] {msg}. Beralih ke model berikutnya...")
                             break
 
-                        if _is_transient(status_code) and attempt < max_transient_retries:
-                            wait_s = min(6, 2 * (attempt + 1))
-                            print(
-                                f"[gemini] {model_name} gangguan sementara ({reason}), "
-                                f"coba ulang dalam {wait_s}s..."
-                            )
-                            self._sleep(wait_s)
-                            continue
-
-                        msg = f"{model_name} gagal ({reason})"
-                        notes.append(msg)
-                        print(f"[gemini] {msg}. Beralih ke model berikutnya...")
+                    if notes and "HTTP 401 -> pindah ke OpenRouter" in notes[-1]:
                         break
+                if notes and "HTTP 401 -> pindah ke OpenRouter" in notes[-1]:
+                    break
+
+        or_result = self._call_openrouter_fallback(
+            system_prompt=system_prompt,
+            full_user_prompt=full_user_prompt,
+            response_model=response_model,
+            temperature=temperature,
+            all_attempted=all_attempted,
+            notes=notes,
+            rate_limited_count=len(standard_429_models),
+        )
+        if or_result is not None:
+            return or_result
 
         raise GeminiClientError(
-            "Semua model Gemini dalam rantai fallback gagal digunakan. "
+            "Semua model Gemini (dan cadangan OpenRouter) gagal digunakan. "
             f"Dicoba: {', '.join(dict.fromkeys(all_attempted))}. Detail: {' | '.join(notes)}"
         )

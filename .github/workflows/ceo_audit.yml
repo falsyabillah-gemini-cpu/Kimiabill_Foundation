@@ -1,0 +1,42 @@
+name: "Kantor Agent 7 - Super Audit Asisten CEO (Mingguan)"
+
+on:
+  schedule:
+    # Setiap Minggu jam 20:30 WIB (13:30 UTC)
+    - cron: "30 13 * * 0"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Mode uji coba (tetap mencatat audit & mengirim ringkasan CEO ke Telegram)"
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  super_audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Agent 7 Super Audit (Asisten CEO)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          THREADS_USER_ID: ${{ secrets.THREADS_USER_ID }}
+          THREADS_ACCESS_TOKEN: ${{ secrets.THREADS_ACCESS_TOKEN }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+        run: python -m src.main super-audit
